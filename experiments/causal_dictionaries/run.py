@@ -108,6 +108,11 @@ def _parse_args() -> argparse.Namespace:
         help="Number of events per rule (default: 2000).",
     )
     parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Run both ISTA baseline and ProductOfExperts, produce comparison.",
+    )
+    parser.add_argument(
         "--baseline",
         action="store_true",
         help="Also train a baseline dictionary on mixed composition.",
@@ -357,6 +362,184 @@ def _print_results(
     print()
     print(f"  OVERALL: {overall} ({n_pass}/5 tests pass)")
     print("=" * 60)
+
+
+def _create_comparison_visualization(
+    ista_results: dict,
+    poe_results: dict,
+    rule_data: dict[str, np.ndarray],
+    output_path: Path,
+) -> None:
+    """Create a side-by-side comparison of ISTA baseline vs ProductOfExperts.
+
+    Args:
+        ista_results: Dict with keys: history, model, spec_scores, test_results.
+        poe_results: Dict with keys: history, model, spec_scores, test_results.
+        rule_data: Per-rule training data.
+        output_path: Path to save the PNG figure.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(15, 11))
+    fig.suptitle(
+        "Baseline (ISTA) vs ProductOfExperts — Raw Encoding",
+        fontsize=14,
+        fontweight="bold",
+        color=_CLR_LINES,
+        y=0.98,
+    )
+
+    # --- Top-left: Training loss curves (both) ---
+    ax_loss = axes[0, 0]
+    for label, res, color in [
+        ("ISTA (baseline)", ista_results, "#E53935"),
+        ("ProductOfExperts", poe_results, "#1565C0"),
+    ]:
+        epochs = [h["epoch"] for h in res["history"]]
+        losses = [h["loss"] for h in res["history"]]
+        ax_loss.plot(epochs, losses, color=color, linewidth=2, label=label)
+    ax_loss.set_xlabel("Epoch", fontsize=10)
+    ax_loss.set_ylabel("MSE Loss", fontsize=10)
+    ax_loss.set_title("Training Loss", fontsize=12, fontweight="bold")
+    ax_loss.legend(fontsize=9)
+    ax_loss.grid(True, alpha=0.3)
+
+    # --- Top-right: Composition tests grouped bar chart ---
+    ax_comp = axes[0, 1]
+    test_names = [str(t["name"]) for t in ista_results["test_results"]]
+    ista_ratios = [float(t["ratio"]) for t in ista_results["test_results"]]
+    poe_ratios = [float(t["ratio"]) for t in poe_results["test_results"]]
+
+    x_pos = np.arange(len(test_names))
+    bar_width = 0.35
+
+    ax_comp.bar(
+        x_pos - bar_width / 2, ista_ratios, bar_width,
+        label="ISTA (baseline)", color="#E53935", alpha=0.7,
+        edgecolor=_CLR_LINES, linewidth=0.5,
+    )
+    ax_comp.bar(
+        x_pos + bar_width / 2, poe_ratios, bar_width,
+        label="ProductOfExperts", color="#1565C0", alpha=0.7,
+        edgecolor=_CLR_LINES, linewidth=0.5,
+    )
+    ax_comp.axhline(
+        y=_RATIO_THRESHOLD, color="#E53935", linestyle="--",
+        linewidth=1.5, alpha=0.5, label=f"Fail threshold ({_RATIO_THRESHOLD})",
+    )
+    ax_comp.set_xticks(x_pos)
+    ax_comp.set_xticklabels(
+        [n.replace(" ", "\n") for n in test_names], fontsize=7.5,
+    )
+    ax_comp.set_ylabel("Reconstruction Ratio", fontsize=10)
+    ax_comp.set_title(
+        "Composition Tests — Reconstruction Ratio (lower is better)",
+        fontsize=12, fontweight="bold",
+    )
+    ax_comp.legend(fontsize=8, loc="upper right")
+    ax_comp.grid(True, alpha=0.2, axis="y")
+
+    # --- Bottom-left: Jaccard comparison ---
+    ax_jacc = axes[1, 0]
+    ista_jaccards = [
+        float(t["jaccard"]) if not np.isnan(float(t["jaccard"])) else 0.0
+        for t in ista_results["test_results"]
+    ]
+    poe_jaccards = [
+        float(t["jaccard"]) if not np.isnan(float(t["jaccard"])) else 0.0
+        for t in poe_results["test_results"]
+    ]
+    ax_jacc.bar(
+        x_pos - bar_width / 2, ista_jaccards, bar_width,
+        label="ISTA (baseline)", color="#E53935", alpha=0.7,
+        edgecolor=_CLR_LINES, linewidth=0.5,
+    )
+    ax_jacc.bar(
+        x_pos + bar_width / 2, poe_jaccards, bar_width,
+        label="ProductOfExperts", color="#1565C0", alpha=0.7,
+        edgecolor=_CLR_LINES, linewidth=0.5,
+    )
+    ax_jacc.axhline(
+        y=_JACCARD_THRESHOLD, color="#43A047", linestyle="--",
+        linewidth=1.5, alpha=0.5, label=f"Pass threshold ({_JACCARD_THRESHOLD})",
+    )
+    ax_jacc.set_xticks(x_pos)
+    ax_jacc.set_xticklabels(
+        [n.replace(" ", "\n") for n in test_names], fontsize=7.5,
+    )
+    ax_jacc.set_ylabel("Jaccard Similarity", fontsize=10)
+    ax_jacc.set_title(
+        "Composition Tests — Jaccard Similarity (higher is better)",
+        fontsize=12, fontweight="bold",
+    )
+    ax_jacc.legend(fontsize=8, loc="lower right")
+    ax_jacc.grid(True, alpha=0.2, axis="y")
+    ax_jacc.set_ylim(0, 1.15)
+
+    # --- Bottom-right: Summary table ---
+    ax_tbl = axes[1, 1]
+    ax_tbl.axis("off")
+
+    ista_pass = sum(1 for t in ista_results["test_results"] if t["passed"])
+    poe_pass = sum(1 for t in poe_results["test_results"] if t["passed"])
+
+    table_data = [
+        ["", "ISTA (baseline)", "ProductOfExperts"],
+        ["Tests passed", f"{ista_pass}/5", f"{poe_pass}/5"],
+        [
+            "Mean specialization",
+            f"{ista_results['spec_scores'].mean():.2f}",
+            f"{poe_results['spec_scores'].mean():.2f}",
+        ],
+        [
+            "Final loss",
+            f"{ista_results['history'][-1]['loss']:.4f}",
+            f"{poe_results['history'][-1]['loss']:.4f}",
+        ],
+    ]
+    for i, test_name in enumerate(test_names):
+        ista_p = "PASS" if ista_results["test_results"][i]["passed"] else "FAIL"
+        poe_p = "PASS" if poe_results["test_results"][i]["passed"] else "FAIL"
+        table_data.append([test_name, ista_p, poe_p])
+
+    table = ax_tbl.table(
+        cellText=table_data[1:],
+        colLabels=table_data[0],
+        cellLoc="center",
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.6)
+
+    # Color pass/fail cells
+    for row_idx in range(1, len(table_data)):
+        for col_idx in range(1, 3):
+            cell = table[row_idx, col_idx]
+            text = cell.get_text().get_text()
+            if text == "PASS":
+                cell.set_facecolor("#C8E6C9")
+            elif text == "FAIL":
+                cell.set_facecolor("#FFCDD2")
+            elif text.startswith("5/5"):
+                cell.set_facecolor("#C8E6C9")
+            elif "/" in text and not text.startswith("5/5"):
+                cell.set_facecolor("#FFCDD2")
+
+    # Header styling
+    for col_idx in range(3):
+        table[0, col_idx].set_facecolor("#E3F2FD")
+        table[0, col_idx].set_text_props(fontweight="bold")
+
+    ax_tbl.set_title(
+        "Results Summary", fontsize=12, fontweight="bold", pad=20,
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        output_path, dpi=150, bbox_inches="tight", facecolor="white",
+    )
+    plt.close(fig)
+    print(f"  Comparison visualization saved: {output_path}")
 
 
 def _create_visualization(
@@ -633,7 +816,122 @@ def main() -> None:
         json.dump(results_json, f, indent=2)
     print(f"  Results JSON saved: {results_path}")
 
-    # Optional: baseline comparison (ISTA)
+    # Optional: comparison mode (ISTA vs ProductOfExperts)
+    if args.compare:
+        print("\n  === COMPARISON MODE ===")
+        # If we just ran ProductOfExperts, we already have its results
+        # If we ran something else, train PoE now
+        poe_results: dict = {}
+        ista_results: dict = {}
+
+        if args.arch == "product-of-experts":
+            poe_results = {
+                "history": history,
+                "model": sd,
+                "spec_scores": spec_scores,
+                "test_results": test_results,
+            }
+            # Train ISTA baseline
+            print("  Training ISTA baseline...")
+            ista_sd = SparseDictionary(
+                n_atoms=args.n_atoms,
+                sparsity=args.sparsity,
+                seed=args.seed,
+            )
+            ista_history = ista_sd.train(all_data, epochs=args.epochs)
+            ista_spec = specialization_scores(ista_sd, rule_data)
+            ista_tests = _run_composition_tests(ista_sd, rule_data, comp_data)
+            ista_results = {
+                "history": ista_history,
+                "model": ista_sd,
+                "spec_scores": ista_spec,
+                "test_results": ista_tests,
+            }
+        else:
+            ista_results = {
+                "history": history,
+                "model": sd,
+                "spec_scores": spec_scores,
+                "test_results": test_results,
+            }
+            # Train ProductOfExperts
+            print("  Training ProductOfExperts...")
+            n_rule = args.n_atoms // 2
+            n_pos = args.n_atoms - n_rule
+            poe_sd = ProductOfExperts(
+                n_rule_atoms=n_rule,
+                n_pos_atoms=n_pos,
+                sparsity=args.sparsity,
+                seed=args.seed,
+            )
+            poe_history = poe_sd.train(all_data, epochs=args.epochs)
+            poe_spec = specialization_scores(poe_sd, rule_data)
+            poe_tests = _run_composition_tests(poe_sd, rule_data, comp_data)
+            poe_results = {
+                "history": poe_history,
+                "model": poe_sd,
+                "spec_scores": poe_spec,
+                "test_results": poe_tests,
+            }
+
+        _create_comparison_visualization(
+            ista_results, poe_results, rule_data,
+            RESULTS_DIR / "comparison.png",
+        )
+
+        # Add comparison data to results JSON
+        results_json["comparison"] = {
+            "ista": {
+                "tests_passed": sum(
+                    1 for t in ista_results["test_results"] if t["passed"]
+                ),
+                "mean_specialization": float(
+                    ista_results["spec_scores"].mean()
+                ),
+                "final_loss": ista_results["history"][-1]["loss"],
+                "tests": [
+                    {
+                        "name": str(t["name"]),
+                        "ratio": float(t["ratio"]),
+                        "jaccard": (
+                            float(t["jaccard"])
+                            if not np.isnan(float(t["jaccard"]))
+                            else None
+                        ),
+                        "passed": bool(t["passed"]),
+                    }
+                    for t in ista_results["test_results"]
+                ],
+            },
+            "product_of_experts": {
+                "tests_passed": sum(
+                    1 for t in poe_results["test_results"] if t["passed"]
+                ),
+                "mean_specialization": float(
+                    poe_results["spec_scores"].mean()
+                ),
+                "final_loss": poe_results["history"][-1]["loss"],
+                "tests": [
+                    {
+                        "name": str(t["name"]),
+                        "ratio": float(t["ratio"]),
+                        "jaccard": (
+                            float(t["jaccard"])
+                            if not np.isnan(float(t["jaccard"]))
+                            else None
+                        ),
+                        "passed": bool(t["passed"]),
+                    }
+                    for t in poe_results["test_results"]
+                ],
+            },
+        }
+        # Re-save with comparison data
+        with results_path.open("w") as f:
+            json.dump(results_json, f, indent=2)
+        print("  Comparison data added to results JSON.")
+
+    # Optional: baseline comparison (ISTA on composition data)
     if args.baseline:
         print("\n  Training BASELINE ISTA on mixed composition...")
         comp_all = np.vstack(list(comp_data.values()))

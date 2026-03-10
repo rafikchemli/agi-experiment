@@ -137,5 +137,81 @@
     }
   ],
   "overall_pass": true,
-  "elapsed_seconds": 5.2
+  "elapsed_seconds": 4.58,
+  "comparison": {
+    "ista": {
+      "tests_passed": 3,
+      "mean_specialization": 0.7102198262123619,
+      "final_loss": 0.02376011856459006,
+      "tests": [
+        {
+          "name": "T1 gravity+containment",
+          "ratio": 2.7188674155680626,
+          "jaccard": 0.6666666666666666,
+          "passed": false
+        },
+        {
+          "name": "T2 gravity+contact",
+          "ratio": 1.6733687498911511,
+          "jaccard": 0.8333333333333334,
+          "passed": true
+        },
+        {
+          "name": "T3 containment+contact",
+          "ratio": 1.3074237533474804,
+          "jaccard": 0.6,
+          "passed": false
+        },
+        {
+          "name": "T4 all three",
+          "ratio": 1.7927440810737825,
+          "jaccard": 0.8333333333333334,
+          "passed": true
+        },
+        {
+          "name": "T5 negation",
+          "ratio": 1.4224915929087607,
+          "jaccard": null,
+          "passed": true
+        }
+      ]
+    },
+    "product_of_experts": {
+      "tests_passed": 5,
+      "mean_specialization": 0.7211020834795802,
+      "final_loss": 0.03154535379250824,
+      "tests": [
+        {
+          "name": "T1 gravity+containment",
+          "ratio": 1.6522209749668797,
+          "jaccard": 1.0,
+          "passed": true
+        },
+        {
+          "name": "T2 gravity+contact",
+          "ratio": 1.2935990468386134,
+          "jaccard": 1.0,
+          "passed": true
+        },
+        {
+          "name": "T3 containment+contact",
+          "ratio": 1.0484562066134577,
+          "jaccard": 1.0,
+          "passed": true
+        },
+        {
+          "name": "T4 all three",
+          "ratio": 1.3571576188611953,
+          "jaccard": 1.0,
+          "passed": true
+        },
+        {
+          "name": "T5 negation",
+          "ratio": 1.4607908682176605,
+          "jaccard": null,
+          "passed": true
+        }
+      ]
+    }
+  }
 }

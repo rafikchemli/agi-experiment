@@ -188,33 +188,31 @@ This is a direct implementation of the **Independent Causal Mechanisms** princip
 
 ## 7. Results
 
-### Raw Encoding + ProductOfExperts (seed 42)
+### Baseline (ISTA) vs ProductOfExperts
 
-| Test | Reconstruction Ratio | Jaccard | Pass |
-|------|---------------------|---------|------|
-| T1 gravity+containment | 1.65 | 1.00 | YES |
-| T2 gravity+contact | 1.29 | 1.00 | YES |
-| T3 containment+contact | 1.05 | 1.00 | YES |
-| T4 all three | 1.36 | 1.00 | YES |
-| T5 negation | 1.46 | -- | YES |
+Both models use identical raw encoding, same data, same hyperparameters — the only difference is the architecture.
 
-**5/5 composition tests pass.** Mean specialization score: 0.72.
+| Test | ISTA (baseline) | | ProductOfExperts | |
+|------|:-:|:-:|:-:|:-:|
+| | Ratio | Jaccard | Ratio | Jaccard |
+| T1 gravity+containment | 2.72 | 0.67 | **1.65** | **1.00** |
+| T2 gravity+contact | 1.67 | 0.83 | **1.29** | **1.00** |
+| T3 containment+contact | 1.31 | 0.60 | **1.05** | **1.00** |
+| T4 all three | 1.79 | 0.83 | **1.36** | **1.00** |
+| T5 negation | 1.42 | -- | 1.46 | -- |
+| **Overall** | **3/5 FAIL** | | **5/5 PASS** | |
+
+ISTA fails on the hardest tests (T1, T3) where gravity's positional diversity inflates the active atom set. ProductOfExperts passes all 5 by factoring rule identity from spatial context.
 
 <p align="center">
-  <img src="experiments/causal_dictionaries/results/poc_results.png" width="800" alt="POC results: training loss, atom-rule affinity, composition tests, specialization distribution">
+  <img src="experiments/causal_dictionaries/results/comparison.png" width="900" alt="Baseline (ISTA) vs ProductOfExperts comparison">
 </p>
 
-### Multi-Seed Evaluation
+### Why ISTA Fails
 
-```bash
-for seed in 42 123 7 999 2024; do
-    make experiment ARGS="--seed $seed"
-done
-```
+ISTA achieves similar specialization (0.71) but fails composition tests because gravity activates too many atoms — it must cover the full range of fall heights and starting positions with a flat dictionary. When gravity composes with containment, the active atom sets are too large for the Jaccard threshold (0.7).
 
-| Seed | Pass Rate | Specialization |
-|------|-----------|---------------|
-| 42 | 5/5 | 0.72 |
+ProductOfExperts resolves this by factoring: gravity gets 1-2 compact rule atoms regardless of how many position atoms it uses. The rule code is constant; the position code varies independently.
 
 ### Hyperparameter Sensitivity
 
@@ -264,6 +262,9 @@ Requires Python >= 3.12. All dependencies are managed via `uv`.
 # Default: ProductOfExperts, raw encoding, 6 atoms, seed 42
 make experiment
 
+# Baseline comparison (ISTA vs ProductOfExperts side-by-side)
+make experiment ARGS="--compare"
+
 # Custom configuration
 make experiment ARGS="--n-atoms 10 --sparsity 0.05 --epochs 120 --n-events 5000 --seed 7"
 ```
@@ -273,6 +274,7 @@ Output includes:
 - Per-atom specialization scores
 - All 5 composition tests with reconstruction ratios and Jaccard similarities
 - Training loss curve, heatmap, and test visualization saved to `experiments/causal_dictionaries/results/`
+- With `--compare`: side-by-side comparison chart saved as `results/comparison.png`
 
 ### Running Tests
 
