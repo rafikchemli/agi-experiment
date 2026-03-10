@@ -101,13 +101,13 @@ class ProductOfExperts:
             history.append({"epoch": epoch, "loss": epoch_loss / max(nb, 1)})
         return history
 
-    def _ista(self, x: np.ndarray, D: np.ndarray, n_atoms: int) -> np.ndarray:
+    def _ista(self, x: np.ndarray, d: np.ndarray, n_atoms: int) -> np.ndarray:
         """ISTA settling for one codebook."""
-        b = x.shape[0]
-        z = np.zeros((b, n_atoms))
+        n = x.shape[0]
+        z = np.zeros((n, n_atoms))
         for _ in range(self.n_settle):
-            residual = x - z @ D.T
-            drive = residual @ D
+            residual = x - z @ d.T
+            drive = residual @ d
             z = z + self.infer_rate * drive
             z = np.maximum(0.0, z - self.sparsity * self.infer_rate)
             np.minimum(z, 5.0, out=z)
@@ -195,7 +195,6 @@ class SlotDictionary:
             nb = 0
             for start in range(0, n, batch_size):
                 x = data[idx[start : start + batch_size]]
-                b = x.shape[0]
 
                 # Iterative slot refinement
                 slots = self._slots.copy()

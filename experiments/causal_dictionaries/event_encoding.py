@@ -14,9 +14,12 @@ Encoding layout (62 dimensions total):
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 
-from experiments.causal_dictionaries.micro_world import Event
+if TYPE_CHECKING:
+    from experiments.causal_dictionaries.micro_world import Event
 
 OBJ_TYPES: list[str] = ["ball", "cup", "box", "shelf", "table"]
 ACTIONS: list[str] = ["gravity_fall", "contained_move", "push", "none"]
@@ -148,6 +151,48 @@ def encode_event_compact(event: Event) -> np.ndarray:
 VECTOR_DIM_COMPACT: int = 19
 
 
+def encode_event_raw(event: Event) -> np.ndarray:
+    """Raw encoding: event fields as-is, no derived features.
+
+    Uses only the fields present in the Event dataclass with minimal
+    transformation (one-hot for categoricals, normalized scalars for
+    positions). No displacement, magnitude, height, or changed flag —
+    the model must discover these relationships itself.
+
+    Layout (16 dimensions):
+      - obj_type:     5 dims  (one-hot)
+      - pos_before:   2 dims  (normalized row, col)
+      - pos_after:    2 dims  (normalized row, col)
+      - action:       4 dims  (one-hot)
+      - state_change: 3 dims  (one-hot)
+
+    Args:
+        event: An Event dataclass instance.
+
+    Returns:
+        A (16,) float64 numpy array.
+    """
+    vec = np.zeros(VECTOR_DIM_RAW, dtype=np.float64)
+    # obj_type one-hot: [0:5]
+    vec[_lookup(OBJ_TYPES, event.obj_type, "obj_type")] = 1.0
+    r_b, c_b = event.pos_before
+    r_a, c_a = event.pos_after
+    scale = max(GRID_SIZE - 1, 1)
+    # raw positions: [5:9]
+    vec[5] = r_b / scale
+    vec[6] = c_b / scale
+    vec[7] = r_a / scale
+    vec[8] = c_a / scale
+    # action one-hot: [9:13]
+    vec[9 + _lookup(ACTIONS, event.action, "action")] = 1.0
+    # state_change one-hot: [13:16]
+    vec[13 + _lookup(STATE_CHANGES, event.state_change, "state_change")] = 1.0
+    return vec
+
+
+VECTOR_DIM_RAW: int = 16
+
+
 def encode_events_v2(
     events: list[Event],
     encoding: str = "original",
@@ -156,7 +201,7 @@ def encode_events_v2(
 
     Args:
         events: List of Event instances.
-        encoding: One of "original", "enriched", "compact".
+        encoding: One of "original", "enriched", "compact", "raw".
 
     Returns:
         Encoded matrix of shape (N, dim).
@@ -167,6 +212,8 @@ def encode_events_v2(
         return np.array([encode_event_enriched(e) for e in events])
     elif encoding == "compact":
         return np.array([encode_event_compact(e) for e in events])
+    elif encoding == "raw":
+        return np.array([encode_event_raw(e) for e in events])
     else:
         msg = f"Unknown encoding: {encoding!r}"
         raise ValueError(msg)

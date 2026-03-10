@@ -38,6 +38,7 @@ from experiments.causal_dictionaries.architectures import (
     ProductOfExperts,
 )
 from experiments.causal_dictionaries.event_encoding import encode_events_v2
+from experiments.causal_dictionaries.learned_encoder import LearnedEncoder
 from experiments.causal_dictionaries.micro_world import (
     generate_composition_events,
     generate_rule_events,
@@ -66,6 +67,14 @@ def _parse_args() -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description="Causal dictionary learning POC runner.",
+    )
+    parser.add_argument(
+        "--encoding",
+        type=str,
+        default="raw",
+        choices=["compact", "raw", "learned"],
+        help="Encoding scheme (default: raw). 'raw' uses no derived features; "
+        "'learned' trains an autoencoder on raw features first.",
     )
     parser.add_argument(
         "--arch",
@@ -115,6 +124,7 @@ def _parse_args() -> argparse.Namespace:
 def _generate_data(
     n_events: int,
     seed: int,
+    encoding: str = "compact",
 ) -> tuple[
     dict[str, np.ndarray],
     np.ndarray,
@@ -125,19 +135,21 @@ def _generate_data(
     Args:
         n_events: Number of events per rule.
         seed: Random seed.
+        encoding: Encoding scheme — "compact", "raw", or "learned".
 
     Returns:
         Tuple of (rule_data dict, shuffled training array,
         composition_data dict).
     """
-    encoding = "compact"
+    # For learned encoding, first encode as raw, then transform
+    base_encoding = "raw" if encoding == "learned" else encoding
     print(f"  Generating training events (encoding={encoding})...")
     rule_data: dict[str, np.ndarray] = {}
     for i, rule in enumerate(["gravity", "containment", "contact"]):
         events = generate_rule_events(
             rule, n_events=n_events, seed=seed + i
         )
-        rule_data[rule] = encode_events_v2(events, encoding=encoding)
+        rule_data[rule] = encode_events_v2(events, encoding=base_encoding)
         print(f"    {rule}: {len(events)} events")
 
     # Shuffle all training data
@@ -159,7 +171,7 @@ def _generate_data(
         events = generate_composition_events(
             rules, n_events=200, seed=seed
         )
-        comp_data[label] = encode_events_v2(events, encoding=encoding)
+        comp_data[label] = encode_events_v2(events, encoding=base_encoding)
         print(f"    {label}: {len(events)} events")
 
     # T5 negation: events from a rule NOT in the training mix
@@ -168,9 +180,28 @@ def _generate_data(
         "gravity", n_events=200, seed=seed + 100
     )
     comp_data["T5 negation"] = encode_events_v2(
-        negation_events, encoding=encoding,
+        negation_events, encoding=base_encoding,
     )
     print(f"    T5 negation: {len(negation_events)} events")
+
+    # Phase 1 (learned encoding only): train autoencoder on raw features
+    if encoding == "learned":
+        print("\n  Phase 1: Training autoencoder on raw features...")
+        ae = LearnedEncoder(
+            input_dim=all_data.shape[1],
+            latent_dim=all_data.shape[1],
+            hidden_dim=32,
+            learn_rate=0.005,
+            seed=seed,
+        )
+        ae.train(all_data, epochs=100, batch_size=64)
+        # Transform all data through encoder bottleneck
+        for rule_name in rule_data:
+            rule_data[rule_name] = ae.encode(rule_data[rule_name])
+        all_data = ae.encode(all_data)
+        for comp_name in comp_data:
+            comp_data[comp_name] = ae.encode(comp_data[comp_name])
+        print(f"  Autoencoder output dim: {all_data.shape[1]}")
 
     return rule_data, all_data, comp_data
 
@@ -500,7 +531,7 @@ def main() -> None:
 
     # Step 1-2: Generate and encode events
     rule_data, all_data, comp_data = _generate_data(
-        args.n_events, args.seed
+        args.n_events, args.seed, encoding=args.encoding,
     )
 
     # Step 3: Build and train model
@@ -561,6 +592,7 @@ def main() -> None:
     # Step 9: Save results JSON
     results_json = {
         "config": {
+            "encoding": args.encoding,
             "architecture": args.arch,
             "n_atoms": args.n_atoms,
             "sparsity": args.sparsity,

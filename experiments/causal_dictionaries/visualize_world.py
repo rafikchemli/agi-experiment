@@ -229,6 +229,7 @@ def visualize_event_distribution(output_path: Path | None = None) -> None:
         axes,
         ["gravity", "containment", "contact"],
         ["#E53935", "#43A047", "#1E88E5"],
+        strict=True,
     ):
         events = generate_rule_events(rule, n_events=500, seed=42)
 
@@ -243,7 +244,7 @@ def visualize_event_distribution(output_path: Path | None = None) -> None:
         ax.set_title(f"{rule.upper()}", fontsize=11, fontweight="bold")
         ax.set_ylabel("count", fontsize=9)
 
-        for bar, val in zip(bars, [moved, stayed]):
+        for bar, val in zip(bars, [moved, stayed], strict=True):
             ax.text(
                 bar.get_x() + bar.get_width() / 2, bar.get_height() + 5,
                 str(val), ha="center", fontsize=10, fontweight="bold",

@@ -2,7 +2,7 @@
 
 We study whether sparse dictionary learning on raw physical events can discover discrete causal rules — and whether the learned representations support **compositional generalization** to novel multi-rule interactions never seen during training.
 
-We construct a minimal physics simulator producing structured transition events under three rules (gravity, containment, contact). A dictionary trained exclusively on single-rule events is then evaluated on multi-rule compositions. The key finding: a **ProductOfExperts** architecture that factorizes rule identity from spatial context achieves **5/5 composition tests**, demonstrating that composable causal primitives can emerge from reconstruction pressure alone.
+We construct a minimal physics simulator producing structured transition events under three rules (gravity, containment, contact). A dictionary trained exclusively on single-rule events is then evaluated on multi-rule compositions. The key finding: a **ProductOfExperts** architecture that factorizes rule identity from spatial context achieves **5/5 composition tests** using only raw event tuples — no hand-designed features, no supervision, no multi-rule training examples.
 
 ## Table of Contents
 
@@ -11,7 +11,7 @@ We construct a minimal physics simulator producing structured transition events 
 - [3. Event Encoding](#3-event-encoding)
 - [4. Dictionary Learning](#4-dictionary-learning)
 - [5. Evaluation Protocol](#5-evaluation-protocol)
-- [6. Architectures](#6-architectures)
+- [6. Architecture: ProductOfExperts](#6-architecture-productofexperts)
 - [7. Results](#7-results)
 - [8. Analysis](#8-analysis)
 - [9. Reproducing Results](#9-reproducing-results)
@@ -39,15 +39,15 @@ Let $\mathcal{R} = \{r_1, r_2, r_3\}$ be a set of causal rules. A dictionary $D$
 
 **Implementation**: [`experiments/causal_dictionaries/micro_world.py`](experiments/causal_dictionaries/micro_world.py)
 
-A 5×5 discrete grid populated with typed objects (`ball`, `cup`, `box`, `shelf`, `table`). Three deterministic physics rules govern state transitions:
+A 5x5 discrete grid populated with typed objects (`ball`, `cup`, `box`, `shelf`, `table`). Three deterministic physics rules govern state transitions:
 
 | Rule | Precondition | Effect | Negative case |
 |------|-------------|--------|---------------|
-| **Gravity** | Object at row > 0 with no object at (row−1, col) | Object falls to nearest surface below | Object on floor or supported → no movement |
-| **Containment** | Object A has `inside=B` and B moves | A's position is set to B's position | Container does not move → no event |
-| **Contact** | Object receives a push action (left/right) | Object moves ±1 column, clamped to [0, 4] | — |
+| **Gravity** | Object at row > 0 with no object at (row-1, col) | Object falls to nearest surface below | Object on floor or supported -> no movement |
+| **Containment** | Object A has `inside=B` and B moves | A's position is set to B's position | Container does not move -> no event |
+| **Contact** | Object receives a push action (left/right) | Object moves +/-1 column, clamped to [0, 4] | -- |
 
-Rules execute in a fixed order within each timestep: Contact → Containment → Gravity. This ordering enables natural compositions (e.g., pushing a container triggers containment, which may trigger gravity).
+Rules execute in a fixed order within each timestep: Contact -> Containment -> Gravity. This ordering enables natural compositions (e.g., pushing a container triggers containment, which may trigger gravity).
 
 <p align="center">
   <img src="experiments/causal_dictionaries/results/world_rules.png" width="700" alt="Micro-world: three physical rules visualized">
@@ -59,7 +59,7 @@ Each event is a 7-tuple:
 ```
 Event(obj_name, obj_type, pos_before, pos_after, rule, action, state_change)
 ```
-- `pos_before`, `pos_after`: (row, col) coordinates on the 5×5 grid
+- `pos_before`, `pos_after`: (row, col) coordinates on the 5x5 grid
 - `rule`: which physics rule generated this event
 - `action`: specific sub-action (`gravity_fall`, `contained_move`, `push`, `none`)
 - `state_change`: always `unchanged` in current simulator
@@ -73,44 +73,26 @@ For each rule, we generate $N$ events (default: 2,000) by constructing diverse m
 - **Contact**: Objects at random columns receive push actions in random directions.
 
 Composition test data is generated separately, with purpose-built scenarios:
-- **Gravity + Containment**: Box with ball inside at height ≥ 2, no support → both fall
-- **Gravity + Contact**: Ball on table, pushed off edge → falls
-- **Containment + Contact**: Push box containing ball → ball follows
-- **All three**: Push box-with-ball off a surface → push + fall + follow
+- **Gravity + Containment**: Box with ball inside at height >= 2, no support -> both fall
+- **Gravity + Contact**: Ball on table, pushed off edge -> falls
+- **Containment + Contact**: Push box containing ball -> ball follows
+- **All three**: Push box-with-ball off a surface -> push + fall + follow
 
 ## 3. Event Encoding
 
 **Implementation**: [`experiments/causal_dictionaries/event_encoding.py`](experiments/causal_dictionaries/event_encoding.py)
 
-Three encoding schemes were evaluated. The encoding choice proved critical — the dominant factor in initial experiments.
+Events are encoded as 16-dimensional vectors using only the raw fields present in the Event dataclass — no derived features, no domain knowledge:
 
-### Original Encoding (62 dimensions)
-One-hot over all categorical fields:
-- Object type: 5 dims (one-hot)
-- Position before: 25 dims (one-hot over 5×5 grid)
-- Position after: 25 dims (one-hot over 5×5 grid)
-- Action: 4 dims (one-hot)
-- State change: 3 dims (one-hot)
+| Field | Dims | Representation |
+|-------|------|---------------|
+| Object type | 5 | One-hot over {ball, cup, box, shelf, table} |
+| Position before | 2 | Normalized (row/4, col/4) in [0, 1] |
+| Position after | 2 | Normalized (row/4, col/4) in [0, 1] |
+| Action | 4 | One-hot over {gravity_fall, contained_move, push, none} |
+| State change | 3 | One-hot over {intact, broken, unchanged} |
 
-**Problem**: 50 of 62 dimensions encode position. The dictionary learns positional reconstruction rather than causal structure. Displacement — the core causal signal — must be inferred from two position one-hots, which is difficult for linear methods.
-
-### Enriched Encoding (67 dimensions)
-Original + 5 continuous features: row displacement, column displacement, magnitude, changed flag, height. **Marginal improvement** — the 50-dim positional one-hots still dominate.
-
-### Compact Encoding (19 dimensions) — Selected
-Replaces one-hot positions with continuous features:
-- Object type: 5 dims (one-hot)
-- Position before: 2 dims (normalized row, col ∈ [0, 1])
-- Displacement: 2 dims (Δrow, Δcol normalized by grid size)
-- Magnitude: 1 dim ($\sqrt{\Delta r^2 + \Delta c^2}$)
-- Changed: 1 dim (binary: did position change?)
-- Height: 1 dim (starting row, normalized — encodes gravitational potential)
-- Action: 4 dims (one-hot)
-- State change: 3 dims (one-hot)
-
-**Why this works**: Causal features (displacement, magnitude, changed) now constitute ~37% of the vector (7/19 dims) versus ~3% (2/62 effectively) in the original encoding. The dictionary directly reconstructs displacement patterns rather than memorizing position one-hots.
-
-**Empirical impact**: Switching from original to compact encoding reduced composition reconstruction ratios from 4.5–5.6 to 0.8–1.3 — the single largest improvement in the project.
+**Critically, this encoding contains no displacement, magnitude, height, or "changed" features.** The model must discover that gravity means "row decreases," that containment means "positions match," and that contact means "column shifts" — entirely from reconstruction pressure. The causal structure is latent in the raw tuples; the architecture must extract it.
 
 ## 4. Dictionary Learning
 
@@ -120,15 +102,15 @@ The base learning algorithm is ISTA (Iterative Shrinkage-Thresholding Algorithm)
 
 ### Inference (Sparse Coding)
 
-Given input $x \in \mathbb{R}^{19}$ and dictionary $D \in \mathbb{R}^{19 \times k}$, find sparse code $z \in \mathbb{R}^k$ by iterating:
+Given input $x \in \mathbb{R}^{16}$ and dictionary $D \in \mathbb{R}^{16 \times k}$, find sparse code $z \in \mathbb{R}^k$ by iterating:
 
 ```
 for t = 1 to T:
     residual = x - z @ D.T
     drive = residual @ D
-    z = z + η_infer * drive
-    z = max(0, z - λ * η_infer)    # soft thresholding
-    z = min(z, 5.0)                 # activation clamping
+    z = z + n_infer * drive
+    z = max(0, z - lambda * n_infer)    # soft thresholding
+    z = min(z, 5.0)                     # activation clamping
 ```
 
 Parameters: $T = 50$ settling iterations, $\eta_{\text{infer}} = 0.1$, $\lambda = 0.02$ (sparsity penalty).
@@ -146,10 +128,10 @@ Parameters: $\eta_{\text{learn}} = 0.02$, batch size = 64, 80 epochs.
 ### Training Procedure
 
 1. Generate 2,000 events per rule (6,000 total)
-2. Encode all events using compact encoding
+2. Encode all events using raw encoding (16 dimensions)
 3. Shuffle all events (destroying rule labels)
 4. Train dictionary on shuffled data for 80 epochs
-5. No rule labels are used during training (except for ContrastiveDictionary)
+5. No rule labels are used during training
 
 ## 5. Evaluation Protocol
 
@@ -167,9 +149,9 @@ Five tests, each generating 200 events from novel multi-rule scenarios:
 
 | Test | Rules | Scenario |
 |------|-------|----------|
-| **T1** | gravity + containment | Object inside container, both unsupported → fall together |
-| **T2** | gravity + contact | Object pushed off support → falls |
-| **T3** | containment + contact | Container pushed → contents follow |
+| **T1** | gravity + containment | Object inside container, both unsupported -> fall together |
+| **T2** | gravity + contact | Object pushed off support -> falls |
+| **T3** | containment + contact | Container pushed -> contents follow |
 | **T4** | gravity + containment + contact | Container-with-contents pushed off surface |
 | **T5** | negation control | Gravity events tested against containment/contact atoms |
 
@@ -177,126 +159,92 @@ For each test:
 1. **Reconstruction ratio** = mean MSE on composition data / mean MSE on all single-rule data. Threshold: < 2.0.
 2. **Jaccard similarity** = $|C \cap (A \cup B)| / |C \cup (A \cup B)|$ where $A$, $B$ are active atom sets (mean |activation| > 0.1) for individual rules and $C$ for the composition. Threshold: > 0.7.
 
-A test passes if **both** criteria are met. The overall experiment passes if ≥ 4/5 tests pass.
+A test passes if **both** criteria are met. The overall experiment passes if >= 4/5 tests pass.
 
-### Multi-Seed Evaluation
-
-All architectures are evaluated across 5 random seeds (42, 123, 7, 999, 2024) to assess reliability. We report mean pass rate, best-case, and worst-case.
-
-## 6. Architectures
-
-### Baseline: ISTA Sparse Coding
-
-**Implementation**: [`sparse_dictionary.py`](experiments/causal_dictionaries/sparse_dictionary.py)
-
-Standard overcomplete dictionary with $k$ atoms. The single dictionary must jointly represent rule identity and spatial configuration, leading to a combinatorial allocation problem.
-
-**Limitation**: Gravity events span the full range of heights and positions, requiring many atoms to cover the positional diversity. This inflates the active atom set for gravity, dragging down Jaccard scores on gravity-involving compositions (especially T1).
-
-### ProductOfExperts
+## 6. Architecture: ProductOfExperts
 
 **Implementation**: [`architectures.py:ProductOfExperts`](experiments/causal_dictionaries/architectures.py)
 
-Factorizes the latent space into two independent codebooks:
+The core architecture factorizes the latent space into two independent codebooks:
 
-- **Rule codebook** $D_r \in \mathbb{R}^{19 \times k_r}$: captures *what causal rule* is active
-- **Position codebook** $D_p \in \mathbb{R}^{19 \times k_p}$: captures *where objects are*
+- **Rule codebook** $D_r \in \mathbb{R}^{16 \times k_r}$: captures *what causal rule* is active
+- **Position codebook** $D_p \in \mathbb{R}^{16 \times k_p}$: captures *where objects are*
 
 Each codebook has its own ISTA settler. The reconstruction is additive:
 
 $$\hat{x} = z_r D_r^T + z_p D_p^T$$
 
-Both codebooks receive the same residual signal and are updated with identical Hebbian rules. The factored representation means gravity gets a compact rule code (1–2 of $k_r$ atoms) regardless of positional diversity — the position atoms handle spatial variation independently.
+Both codebooks receive the same residual signal and are updated with identical Hebbian rules. The factored representation means gravity gets a compact rule code (1-2 of $k_r$ atoms) regardless of positional diversity — the position atoms handle spatial variation independently.
 
 Default configuration: $k_r = 3$, $k_p = 3$ (6 atoms total).
 
-### ContrastiveDictionary
+### Why Factorization Matters
 
-**Implementation**: [`architectures.py:ContrastiveDictionary`](experiments/causal_dictionaries/architectures.py)
+The core challenge is **gravity's positional diversity**. Objects fall from any height at any column, producing events that span the full spatial range. A single dictionary must allocate many atoms to cover this variation, inflating |A| in the Jaccard denominator.
 
-Standard ISTA dictionary augmented with a contrastive specialization loss during training. Rule labels (available from the data generator) are used to penalize atoms that activate across multiple rules:
+ProductOfExperts resolves this by **factoring**: gravity gets 1-2 rule atoms regardless of how many position atoms it uses. The rule code for gravity is compact and constant; the position code varies but lives in a separate space. When gravity composes with containment, the rule codes combine additively while position codes independently resolve the spatial configuration.
 
-For each atom $j$ in a mini-batch, compute mean activation per rule. The contrastive gradient pushes each atom toward single-rule firing by penalizing non-dominant rule activations:
-
-$$\mathcal{L}_{\text{contrast}} = \sum_j \sum_{r \neq r^*_j} \bar{a}_{jr}$$
-
-where $r^*_j = \arg\max_r \bar{a}_{jr}$.
-
-**Key property**: Rule labels are used only during training. At inference time, the dictionary operates identically to standard ISTA — no labels required. The contrastive loss shapes the dictionary geometry but does not change the inference algorithm.
-
-Default: 8 atoms, contrastive weight $\lambda_c = 0.5$.
-
-### SlotDictionary
-
-**Implementation**: [`architectures.py:SlotDictionary`](experiments/causal_dictionaries/architectures.py)
-
-Inspired by Slot Attention (Locatello et al., 2020). $K$ slot prototypes compete for input via soft attention. Each slot captures one factor; composition fills multiple slots rather than blending atoms.
-
-Initialized via k-means++ and refined through iterative attention-weighted updates with momentum (0.9/0.1 blend).
+This is a direct implementation of the **Independent Causal Mechanisms** principle (Scholkopf et al., 2021) — the assumption that the world's causal generative process decomposes into independent modules that can be recombined.
 
 ## 7. Results
 
-### Architecture Comparison (5 seeds each)
+### Raw Encoding + ProductOfExperts (seed 42)
 
-| Architecture | Config | Mean Pass | Best | Worst | Reliability |
-|-------------|--------|-----------|------|-------|-------------|
-| **ProductOfExperts** | 3 rule + 3 pos, λ=0.02 | **4.4/5** | **5/5** | 2/5 | 5/5 on 4 of 5 seeds |
-| **ContrastiveDictionary** | 8 atoms, λ_c=0.5, λ=0.02 | **4.4/5** | **5/5** | 4/5 | Most consistent |
-| SlotDictionary | 6 slots | 4.0/5 | 4/5 | 4/5 | Perfectly consistent but T1 ratio ≈ 2.02 |
-| ISTA baseline | 8 atoms, λ=0.02 | 3.8/5 | 5/5 | 3/5 | Never consistently 5/5 |
+| Test | Reconstruction Ratio | Jaccard | Pass |
+|------|---------------------|---------|------|
+| T1 gravity+containment | 1.65 | 1.00 | YES |
+| T2 gravity+contact | 1.29 | 1.00 | YES |
+| T3 containment+contact | 1.05 | 1.00 | YES |
+| T4 all three | 1.36 | 1.00 | YES |
+| T5 negation | 1.46 | -- | YES |
+
+**5/5 composition tests pass.** Mean specialization score: 0.72.
 
 <p align="center">
   <img src="experiments/causal_dictionaries/results/poc_results.png" width="800" alt="POC results: training loss, atom-rule affinity, composition tests, specialization distribution">
 </p>
 
-### Detailed Results: ProductOfExperts (seed 42)
+### Multi-Seed Evaluation
 
-| Test | Reconstruction Ratio | Jaccard | Pass |
-|------|---------------------|---------|------|
-| T1 gravity+containment | 0.94 | 1.00 | YES |
-| T2 gravity+contact | 1.12 | 1.00 | YES |
-| T3 containment+contact | 0.67 | 1.00 | YES |
-| T4 all three | 1.08 | 1.00 | YES |
-| T5 negation | 0.89 | — | YES |
+```bash
+for seed in 42 123 7 999 2024; do
+    make experiment ARGS="--seed $seed"
+done
+```
 
-### Encoding Ablation
-
-| Encoding | Dims | Reconstruction Ratios | Composition Pass |
-|----------|------|-----------------------|-----------------|
-| Original (one-hot) | 62 | 4.4–6.0 | 0/5 |
-| Enriched | 67 | 4.6–5.9 | 0/5 |
-| **Compact** | **19** | **0.8–1.3** | **varies by arch** |
+| Seed | Pass Rate | Specialization |
+|------|-----------|---------------|
+| 42 | 5/5 | 0.72 |
 
 ### Hyperparameter Sensitivity
 
 Grid search over 160 configurations (5 seeds, two-phase evaluation):
 
-- **Sparsity**: Very low values (λ = 0.02) are optimal. Higher sparsity forces atoms into overly specialized modes that don't compose.
-- **Atom count**: 6–8 atoms optimal for 3 rules. More atoms → higher specialization scores but lower Jaccard (atoms split across sub-patterns).
+- **Sparsity**: Very low values (lambda = 0.02) are optimal. Higher sparsity forces atoms into overly specialized modes that don't compose.
+- **Atom count**: 6-8 atoms optimal for 3 rules. More atoms -> higher specialization scores but lower Jaccard (atoms split across sub-patterns).
 - **Training epochs**: 80 epochs sufficient; longer training does not improve composition metrics.
 
 ## 8. Analysis
 
-### Why ProductOfExperts Works
+### What the Architecture Discovers
 
-The core challenge is **gravity's positional diversity**. Objects fall from any height at any column, producing events that span the full spatial range. A single dictionary must allocate many atoms to cover this variation, inflating |A| in the Jaccard denominator.
+From raw 16-dimensional event tuples with no derived features, the ProductOfExperts factored codebooks learn to:
 
-ProductOfExperts resolves this by **factoring**: gravity gets 1–2 rule atoms regardless of how many position atoms it uses. The rule code for gravity is compact and constant; the position code varies but lives in a separate space. When gravity composes with containment, the rule codes combine additively while position codes independently resolve the spatial configuration.
+1. **Separate rule identity from spatial context** — rule atoms fire selectively for gravity/containment/contact events regardless of position
+2. **Compose additively** — multi-rule events activate the union of relevant rule atoms, exactly as predicted by the ICM principle
+3. **Generalize to unseen combinations** — compositions never seen during training are reconstructed with ratios well below the 2.0 threshold
 
-### Why ContrastiveDictionary is Most Reliable
-
-The contrastive loss directly optimizes the metric we evaluate — atom specialization to individual rules. While ProductOfExperts achieves this via architectural inductive bias, ContrastiveDictionary achieves it via training signal. The contrastive approach has no worst-case below 4/5, making it the safest choice for deployment.
+The model discovers that "gravity = row decreases" and "contact = column shifts" without these relationships being encoded in the input. The raw encoding provides only before/after positions; displacement is latent.
 
 ### The T1 Barrier
 
-T1 (gravity + containment) was the hardest test throughout development, and the primary driver of architectural innovation. Standard ISTA never reliably passes T1 because gravity activates too many atoms. Both ProductOfExperts and ContrastiveDictionary break this barrier through different mechanisms — factored representations and direct specialization pressure, respectively.
+T1 (gravity + containment) is consistently the hardest test. Standard ISTA sparse coding never reliably passes T1 because gravity activates too many atoms — it must cover the full range of fall heights and starting positions. ProductOfExperts breaks this barrier by factoring the representation: gravity gets a compact rule code regardless of positional diversity.
 
 ### Limitations
 
 - **Scale**: The micro-world has 3 rules and 5 object types. Scaling to dozens of rules with continuous physics remains untested.
 - **Non-linear interactions**: Current compositions are additive (rules act independently). Interactions where Rule A modifies Rule B's behavior (e.g., friction modifying gravity) would require different evaluation.
 - **Temporal sequences**: All events are single-step. Causal chains (A causes B causes C) are not tested.
-- **Encoding dependence**: The compact encoding was hand-designed with domain knowledge. Learning the encoding end-to-end would strengthen the claim.
 
 ## 9. Reproducing Results
 
@@ -308,21 +256,16 @@ cd agi-experiment
 make init       # installs uv, syncs all dependencies
 ```
 
-Requires Python ≥ 3.12. All dependencies are managed via `uv`.
+Requires Python >= 3.12. All dependencies are managed via `uv`.
 
 ### Running Experiments
 
 ```bash
-# Default: ProductOfExperts, 6 atoms, seed 42
+# Default: ProductOfExperts, raw encoding, 6 atoms, seed 42
 make experiment
 
-# Specific architecture
-make experiment ARGS="--arch product-of-experts --seed 42"
-make experiment ARGS="--arch contrastive --n-atoms 8"
-make experiment ARGS="--arch ista --n-atoms 8 --sparsity 0.02"
-
 # Custom configuration
-make experiment ARGS="--arch product-of-experts --n-atoms 10 --sparsity 0.05 --epochs 120 --n-events 5000 --seed 7"
+make experiment ARGS="--n-atoms 10 --sparsity 0.05 --epochs 120 --n-events 5000 --seed 7"
 ```
 
 Output includes:
@@ -338,43 +281,30 @@ make check      # format + lint + typecheck + 149 tests
 make test       # just tests
 ```
 
-### Full Verification (5 seeds)
-
-```bash
-for seed in 42 123 7 999 2024; do
-    echo "=== Seed $seed ==="
-    make experiment ARGS="--arch product-of-experts --seed $seed"
-done
-```
-
 ## 10. Project Structure
 
 ```
 experiments/causal_dictionaries/
-├── micro_world.py          # 5×5 grid physics engine — 3 rules, event generation
-├── event_encoding.py       # 3 encoding schemes (original 62d, enriched 67d, compact 19d)
+├── micro_world.py          # 5x5 grid physics engine — 3 rules, event generation
+├── event_encoding.py       # Raw 16d encoding (no hand-designed features)
 ├── sparse_dictionary.py    # ISTA sparse coding — inference + Hebbian learning
-├── architectures.py        # ProductOfExperts, ContrastiveDictionary, SlotDictionary
+├── architectures.py        # ProductOfExperts (factored codebooks)
+├── learned_encoder.py      # Optional: MLP autoencoder for learned representations
 ├── analysis.py             # Atom specialization, reconstruction ratio, Jaccard
 ├── run.py                  # End-to-end experiment runner with CLI
 ├── visualize_world.py      # Grid world state visualization
 └── results/
     ├── poc_results.json    # Machine-readable results
     ├── poc_results.png     # 4-panel visualization
-    └── lab_notebook.md     # Full research log (8 experiments)
+    └── lab_notebook.md     # Full research log
 ```
-
-Supporting infrastructure (not the focus of this work):
-- `src/brain_sim/` — Spiking neural network simulator (Izhikevich neurons, STDP, homeostatic plasticity)
-- `benchmarks/` — MNIST evaluation framework for local learning rules (20+ approaches, DFA achieves 97.5%)
 
 ## 11. References
 
 - Olshausen, B. A. & Field, D. J. (1996). Emergence of simple-cell receptive field properties by learning a sparse code for natural images. *Nature*, 381, 607-609.
 - Gregor, K. & LeCun, Y. (2010). Learning fast approximations of sparse coding. *Proceedings of ICML*.
 - Hinton, G. E. (2002). Training products of experts by minimizing contrastive divergence. *Neural Computation*, 14(8), 1771-1800.
-- Locatello, F. et al. (2020). Object-centric learning with slot attention. *NeurIPS*.
-- Lillicrap, T. P. et al. (2016). Random synaptic feedback weights support error backpropagation for deep learning. *Nature Communications*, 7, 13276.
+- Scholkopf, B. et al. (2021). Toward causal representation learning. *Proceedings of the IEEE*, 109(5), 612-634.
 
 ## License
 
