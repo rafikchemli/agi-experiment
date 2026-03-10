@@ -1,11 +1,11 @@
 [project]
 name = "agi-experiment"
 version = "0.1.0"
-description = "Biologically plausible spiking neural network simulator built from first principles"
+description = "Emergent composable causal primitives from unsupervised sparse dictionary learning on raw physical events"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
-keywords = ["neuroscience", "spiking-neural-network", "STDP", "sparse-coding", "computational-neuroscience"]
+keywords = ["causal-learning", "sparse-coding", "compositionality", "unsupervised-learning", "emergent-abstraction", "dictionary-learning"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
