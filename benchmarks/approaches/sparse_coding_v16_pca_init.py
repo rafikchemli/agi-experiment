@@ -1,0 +1,358 @@
+"""PCA-initialized energy-based sparse coding with augmentation.
+
+Builds on v9 (augmentation + incoherence) with a key change: instead of
+random dictionary initialization, each class dictionary is initialized
+from the top principal components of that class's training images. This
+gives the dictionary a massive head start — starting with the most
+important features of each class already captured.
+
+The remaining dictionary atoms (beyond the number of PCA components used)
+are initialized randomly as before.
+
+Quick analysis: v9 takes ~5 epochs to reach 95% accuracy. With PCA init,
+the dictionaries start already explaining ~80-90% of variance, so the
+first few epochs can focus on REFINING features rather than discovering
+basic structure from scratch.
+
+Architecture: Same as v9 — 10 class-specific dictionaries with incoherence
+    regularization and microsaccade augmentation. Only initialization changes.
+
+PCA initialization:
+    For each class k:
+    1. Collect all training images of class k
+    2. Compute SVD: U, S, V = svd(X_k - mean(X_k))
+    3. Initialize first n_pca_init atoms from top V columns
+    4. Initialize remaining atoms randomly
+    5. Normalize all columns
+
+Biological analogue:
+    - Genetically pre-wired cortical structure: V1 neurons don't start
+      from random synaptic weights. Spontaneous retinal waves during
+      prenatal development establish structured initial connectivity
+      (Ackman et al. 2012, Cang & Feldheim 2013).
+    - The PCA components represent the dominant statistical structure
+      of each digit class — the "innate knowledge" that evolution
+      has pre-wired into the visual cortex through genetic programs.
+    - Random remaining atoms ≈ experience-dependent plasticity that
+      refines the genetically specified scaffold.
+
+Based on:
+    - v9 architecture
+    - Ackman et al. (2012): Retinal waves coordinate patterned activity
+    - Cang & Feldheim (2013): Developmental mechanisms of topographic maps
+    - Mairal et al. (2010): Online dictionary learning with warm-start
+"""
+
+import numpy as np
+
+from benchmarks.base import EpochMetrics, MNISTApproach
+
+
+def _random_shift(
+    images: np.ndarray, max_shift: int, rng: np.random.Generator
+) -> np.ndarray:
+    """Apply random pixel shifts to a batch of 28x28 images.
+
+    Args:
+        images: Flattened images, shape (B, 784).
+        max_shift: Maximum shift in pixels (each direction).
+        rng: Random generator.
+
+    Returns:
+        Shifted images, shape (B, 784).
+    """
+    b = images.shape[0]
+    imgs_2d = images.reshape(b, 28, 28)
+    shifted = np.zeros_like(imgs_2d)
+
+    dx = rng.integers(-max_shift, max_shift + 1, size=b)
+    dy = rng.integers(-max_shift, max_shift + 1, size=b)
+
+    for i in range(b):
+        sx, sy = int(dx[i]), int(dy[i])
+        src_y = slice(max(0, -sy), min(28, 28 - sy))
+        src_x = slice(max(0, -sx), min(28, 28 - sx))
+        dst_y = slice(max(0, sy), min(28, 28 + sy))
+        dst_x = slice(max(0, sx), min(28, 28 + sx))
+        shifted[i, dst_y, dst_x] = imgs_2d[i, src_y, src_x]
+
+    return shifted.reshape(b, 784)
+
+
+def _pca_init_dictionary(
+    images: np.ndarray,
+    n_components: int,
+    n_total: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Initialize dictionary atoms from PCA components of class images.
+
+    First n_components atoms come from SVD of the class images.
+    Remaining (n_total - n_components) atoms are random.
+
+    Args:
+        images: Class images, shape (M, 784).
+        n_components: Number of PCA-initialized atoms.
+        n_total: Total dictionary atoms.
+        rng: Random generator.
+
+    Returns:
+        Dictionary, shape (784, n_total), column-normalized.
+    """
+    n_px = images.shape[1]
+    n_pca = min(n_components, n_total, images.shape[0])
+
+    # SVD of centered data
+    mean_img = images.mean(axis=0, keepdims=True)
+    centered = images - mean_img
+    # Only need top-n_pca right singular vectors
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    pca_atoms = vt[:n_pca].T  # (784, n_pca)
+
+    # Random atoms for the rest
+    n_random = n_total - n_pca
+    if n_random > 0:
+        random_atoms = rng.normal(0, 1.0, (n_px, n_random))
+        d = np.hstack([pca_atoms, random_atoms])
+    else:
+        d = pca_atoms[:, :n_total]
+
+    # Normalize columns
+    norms = np.linalg.norm(d, axis=0, keepdims=True) + 1e-8
+    d /= norms
+    return d
+
+
+class SparseCodingV16PCAInit(MNISTApproach):
+    """PCA-initialized energy-based sparse coding with augmentation.
+
+    Same architecture as v9 but dictionaries are initialized from PCA
+    components of each class's training images instead of random.
+
+    Args:
+        n_features_per_class: Dictionary atoms per class.
+        n_pca_init: Number of atoms to initialize from PCA.
+        n_classes: Number of digit classes.
+        n_settle: ISTA iterations per settling run.
+        sparsity: Soft-threshold lambda.
+        infer_rate: ISTA step size.
+        learn_rate: Dictionary learning rate.
+        incoherence_rate: Inter-dictionary repulsion strength.
+        max_shift: Maximum augmentation shift in pixels.
+        epochs: Training epochs.
+        batch_size: Mini-batch size.
+        seed: Random seed.
+    """
+
+    name = "sparse_coding_v16"
+    uses_backprop = False
+
+    def __init__(
+        self,
+        n_features_per_class: int = 200,
+        n_pca_init: int = 100,
+        n_classes: int = 10,
+        n_settle: int = 40,
+        sparsity: float = 0.01,
+        infer_rate: float = 0.1,
+        learn_rate: float = 0.01,
+        incoherence_rate: float = 0.001,
+        max_shift: int = 1,
+        epochs: int = 35,
+        batch_size: int = 256,
+        seed: int = 42,
+    ) -> None:
+        self.n_features_per_class = n_features_per_class
+        self.n_pca_init = n_pca_init
+        self.n_classes = n_classes
+        self.n_settle = n_settle
+        self.sparsity = sparsity
+        self.infer_rate = infer_rate
+        self.learn_rate = learn_rate
+        self.incoherence_rate = incoherence_rate
+        self.max_shift = max_shift
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.rng = np.random.default_rng(seed)
+
+        self.dictionaries: list[np.ndarray] = []
+
+    def _settle(self, x: np.ndarray, d: np.ndarray) -> np.ndarray:
+        """ISTA settling for a specific dictionary.
+
+        Args:
+            x: Input, shape (B, 784).
+            d: Dictionary, shape (784, n_features_per_class).
+
+        Returns:
+            Sparse codes z, shape (B, n_features_per_class).
+        """
+        b = x.shape[0]
+        n_feat = d.shape[1]
+        z = np.zeros((b, n_feat), dtype=np.float64)
+        step = self.infer_rate
+        threshold = self.sparsity * step
+
+        for _ in range(self.n_settle):
+            residual = x - z @ d.T
+            drive = residual @ d
+            z = z + step * drive
+            z = np.maximum(0.0, z - threshold)
+            np.minimum(z, 5.0, out=z)
+
+        return z
+
+    def _recon_error(self, x: np.ndarray, d: np.ndarray) -> np.ndarray:
+        """Compute per-sample reconstruction error.
+
+        Args:
+            x: Input, shape (B, 784).
+            d: Dictionary, shape (784, n_features_per_class).
+
+        Returns:
+            Error per sample, shape (B,).
+        """
+        z = self._settle(x, d)
+        recon = z @ d.T
+        return np.mean((x - recon) ** 2, axis=1)
+
+    def _apply_incoherence(self, k: int) -> None:
+        """Push dictionary k away from other dictionaries' subspaces.
+
+        Args:
+            k: Index of the dictionary to regularize.
+        """
+        d_k = self.dictionaries[k]
+        penalty = np.zeros_like(d_k)
+
+        for j in range(self.n_classes):
+            if j == k:
+                continue
+            d_j = self.dictionaries[j]
+            overlap = d_j @ (d_j.T @ d_k)
+            penalty += overlap
+
+        self.dictionaries[k] -= self.incoherence_rate * penalty
+
+    def train(self, images: np.ndarray, labels: np.ndarray) -> None:
+        """Train with PCA-initialized dictionaries.
+
+        Args:
+            images: Training images, shape (N, 784), float64 in [0, 1].
+            labels: Training labels, shape (N,), int in [0, 9].
+        """
+        n_samples, n_px = images.shape
+
+        # PCA-initialized dictionaries
+        print("    Initializing dictionaries from PCA...")
+        self.dictionaries = []
+        for k in range(self.n_classes):
+            class_images = images[labels == k]
+            d = _pca_init_dictionary(
+                class_images,
+                self.n_pca_init,
+                self.n_features_per_class,
+                self.rng,
+            )
+            self.dictionaries.append(d)
+
+        for epoch in range(self.epochs):
+            perm = self.rng.permutation(n_samples)
+            total_recon = 0.0
+            n_batches = 0
+
+            for start in range(0, n_samples, self.batch_size):
+                idx = perm[start : start + self.batch_size]
+                x_batch = images[idx]
+                y_batch = labels[idx]
+
+                x_aug = _random_shift(x_batch, self.max_shift, self.rng)
+
+                for k in range(self.n_classes):
+                    mask = y_batch == k
+                    if mask.sum() < 2:  # noqa: PLR2004
+                        continue
+
+                    x_k = x_aug[mask]
+                    bs = x_k.shape[0]
+                    d = self.dictionaries[k]
+
+                    z = self._settle(x_k, d)
+
+                    residual = x_k - z @ d.T
+                    total_recon += float(np.sum(residual**2)) / n_px
+
+                    self.dictionaries[k] += self.learn_rate * (residual.T @ z) / bs
+
+                    self._apply_incoherence(k)
+
+                    norms = np.linalg.norm(
+                        self.dictionaries[k], axis=0, keepdims=True
+                    )
+                    self.dictionaries[k] /= norms + 1e-8
+
+                n_batches += 1
+
+            eval_idx = self.rng.choice(
+                n_samples, size=min(2000, n_samples), replace=False
+            )
+            preds = self.predict(images[eval_idx])
+            acc = float(np.mean(preds == labels[eval_idx]))
+            avg_recon = total_recon / n_samples
+
+            self.history.append(
+                EpochMetrics(epoch=epoch + 1, train_acc=acc, loss=avg_recon)
+            )
+            print(
+                f"    Epoch {epoch + 1}/{self.epochs} — "
+                f"recon: {avg_recon:.4f}, train acc: {acc:.4f}"
+            )
+
+    def predict(self, images: np.ndarray) -> np.ndarray:
+        """Classify by competitive reconstruction.
+
+        Args:
+            images: Test images, shape (N, 784).
+
+        Returns:
+            Predicted labels, shape (N,), int in [0, 9].
+        """
+        if not self.dictionaries:
+            msg = "Model not trained yet"
+            raise RuntimeError(msg)
+
+        n = images.shape[0]
+        errors = np.zeros((n, self.n_classes), dtype=np.float64)
+
+        batch_sz = 1000
+        for start in range(0, n, batch_sz):
+            x_batch = images[start : start + batch_sz]
+            bs = x_batch.shape[0]
+
+            for k in range(self.n_classes):
+                err = self._recon_error(x_batch, self.dictionaries[k])
+                errors[start : start + bs, k] = err
+
+        return np.argmin(errors, axis=1).astype(np.uint8)
+
+    def get_internals(self) -> dict[str, object]:
+        """Expose class-specific dictionaries for analysis.
+
+        Returns:
+            Dict with per-class dictionaries and coherence.
+        """
+        internals: dict[str, object] = {}
+        for k, d in enumerate(self.dictionaries):
+            internals[f"dictionary_{k}"] = d
+
+        if len(self.dictionaries) >= 2:  # noqa: PLR2004
+            coherences = []
+            for k in range(self.n_classes):
+                for j in range(k + 1, self.n_classes):
+                    coh = np.linalg.norm(
+                        self.dictionaries[k].T @ self.dictionaries[j]
+                    )
+                    coherences.append(coh)
+            internals["mean_coherence"] = float(np.mean(coherences))
+
+        return internals
