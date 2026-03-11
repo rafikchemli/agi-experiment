@@ -1,9 +1,11 @@
 """5x5 grid world simulator with physical rules for causal dictionary learning.
 
-Implements a minimal physics engine with three rules:
+Implements a minimal physics engine with five rules:
   - Gravity: unsupported objects fall to the nearest surface below.
   - Containment: objects inside a container share its position.
   - Contact: pushing an object moves it one cell left or right.
+  - Bounce: elastic objects (ball) bounce 1 row up after a gravity fall.
+  - Breakage: fragile objects (cup) break when falling >= 2 rows.
 
 The simulator generates transition events that serve as training data
 for sparse dictionary learning of causal primitives.
@@ -16,6 +18,11 @@ import numpy as np
 GRID_ROWS = 5
 GRID_COLS = 5
 OBJECT_TYPES = ("ball", "cup", "box", "shelf", "table")
+
+# Object type properties for bounce and breakage rules
+ELASTIC_TYPES = ("ball",)       # Bounce after gravity fall
+FRAGILE_TYPES = ("cup",)        # Break on hard impact
+BREAKAGE_THRESHOLD = 2          # Minimum fall distance to trigger breakage
 
 
 @dataclass(frozen=True)
@@ -138,6 +145,8 @@ class GridWorld:
           1. Contact (process push queue)
           2. Containment (sync contained objects to containers)
           3. Gravity (unsupported objects fall)
+          4. Bounce (elastic objects bounce up 1 row after falling)
+          5. Breakage (fragile objects break on hard landing)
 
         Returns:
             List of events generated during this step.
@@ -195,6 +204,9 @@ class GridWorld:
                     ))
 
         # --- 3. Gravity: unsupported objects fall ---
+        # Track falls for bounce/breakage rules
+        gravity_falls: dict[str, int] = {}  # name → fall distance
+
         # Sort by row ascending so lower objects settle first
         sorted_objs = sorted(
             self._objects.values(),
@@ -237,8 +249,10 @@ class GridWorld:
             else:
                 # Fall to the nearest surface below
                 landing_row = self._find_landing_row(obj)
+                fall_distance = obj.row - landing_row
                 obj.row = landing_row
                 new_pos = (obj.row, obj.col)
+                gravity_falls[obj.name] = fall_distance
 
                 events.append(Event(
                     obj_name=obj.name,
@@ -248,6 +262,39 @@ class GridWorld:
                     rule="gravity",
                     action="gravity_fall",
                     state_change="unchanged",
+                ))
+
+        # --- 4. Bounce: elastic objects bounce up 1 row after falling ---
+        for name, fall_dist in gravity_falls.items():
+            obj = self._objects[name]
+            if obj.obj_type in ELASTIC_TYPES and obj.row < GRID_ROWS - 1:
+                bounce_before = (obj.row, obj.col)
+                obj.row += 1
+                events.append(Event(
+                    obj_name=name,
+                    obj_type=obj.obj_type,
+                    pos_before=bounce_before,
+                    pos_after=(obj.row, obj.col),
+                    rule="bounce",
+                    action="bounce",
+                    state_change="unchanged",
+                ))
+
+        # --- 5. Breakage: fragile objects break on hard landing ---
+        for name, fall_dist in gravity_falls.items():
+            obj = self._objects[name]
+            if (
+                obj.obj_type in FRAGILE_TYPES
+                and fall_dist >= BREAKAGE_THRESHOLD
+            ):
+                events.append(Event(
+                    obj_name=name,
+                    obj_type=obj.obj_type,
+                    pos_before=(obj.row, obj.col),
+                    pos_after=(obj.row, obj.col),
+                    rule="breakage",
+                    action="break_on_impact",
+                    state_change="broken",
                 ))
 
         return events
@@ -340,6 +387,10 @@ def generate_rule_events(
         return _generate_containment_events(n_events, seed)
     elif rule == "contact":
         return _generate_contact_events(n_events, seed)
+    elif rule == "bounce":
+        return _generate_bounce_events(n_events, seed)
+    elif rule == "breakage":
+        return _generate_breakage_events(n_events, seed)
     else:
         msg = f"Unknown rule: {rule!r}"
         raise ValueError(msg)
@@ -453,15 +504,20 @@ def generate_composition_events(
     Supported combinations:
         - ["gravity", "containment"]: object inside container loses
           support, both fall together.
-        - ["gravity", "contact"]: push object off edge of support,
+        - ["gravity", "contact"]: push non-elastic object off support,
           it falls.
         - ["containment", "contact"]: push container, contents follow.
         - ["gravity", "containment", "contact"]: push container off
           edge, contents follow and fall.
+        - ["gravity", "bounce"]: ball at height falls and bounces.
+        - ["gravity", "breakage"]: cup at height >= 2 falls and breaks.
+        - ["gravity", "contact", "bounce"]: push ball off support,
+          it falls and bounces.
+        - ["gravity", "contact", "breakage"]: push cup off high
+          support, it falls and breaks.
 
     Args:
-        rules: List of rule names to combine (subset of
-            {"gravity", "containment", "contact"}).
+        rules: List of rule names to combine.
         n_events: Exact number of events to generate.
         seed: Random seed for reproducibility.
 
@@ -478,6 +534,7 @@ def generate_composition_events(
 
         if rule_set == frozenset({"gravity", "containment"}):
             # Box with ball inside at height 2, no support -> both fall
+            # Ball is contained so no bounce; box is not fragile so no break
             col = int(rng.integers(0, GRID_COLS))
             height = int(rng.integers(2, GRID_ROWS))
             box_name = f"box{scenario_idx}"
@@ -488,14 +545,15 @@ def generate_composition_events(
             )
 
         elif rule_set == frozenset({"gravity", "contact"}):
-            # Ball on a table, push ball off the edge so it falls
+            # Box on a table, push box off the edge so it falls
+            # Box is non-elastic (no bounce) and non-fragile (no break)
             col = int(rng.integers(1, GRID_COLS - 1))
             table_name = f"table{scenario_idx}"
-            ball_name = f"ball{scenario_idx}"
+            box_name = f"box{scenario_idx}"
             world.place(table_name, row=0, col=col)
-            world.place(ball_name, row=1, col=col)
+            world.place(box_name, row=1, col=col)
             direction = "right" if rng.random() < 0.5 else "left"
-            world.push(ball_name, direction=direction)
+            world.push(box_name, direction=direction)
 
         elif rule_set == frozenset({"containment", "contact"}):
             # Push box containing ball -> ball follows
@@ -513,6 +571,7 @@ def generate_composition_events(
             {"gravity", "containment", "contact"}
         ):
             # Push box-with-ball off a surface -> push + fall + follow
+            # Box is non-elastic, non-fragile; ball is contained
             col = int(rng.integers(1, GRID_COLS - 1))
             table_name = f"table{scenario_idx}"
             box_name = f"box{scenario_idx}"
@@ -524,6 +583,44 @@ def generate_composition_events(
             )
             direction = "right" if rng.random() < 0.5 else "left"
             world.push(box_name, direction=direction)
+
+        elif rule_set == frozenset({"gravity", "bounce"}):
+            # Ball at height, unsupported -> falls and bounces
+            col = int(rng.integers(0, GRID_COLS))
+            height = int(rng.integers(1, GRID_ROWS))
+            ball_name = f"ball{scenario_idx}"
+            world.place(ball_name, row=height, col=col)
+
+        elif rule_set == frozenset({"gravity", "breakage"}):
+            # Cup at height >= 2, unsupported -> falls and breaks
+            col = int(rng.integers(0, GRID_COLS))
+            height = int(rng.integers(2, GRID_ROWS))
+            cup_name = f"cup{scenario_idx}"
+            world.place(cup_name, row=height, col=col)
+
+        elif rule_set == frozenset({"gravity", "contact", "bounce"}):
+            # Ball on table, push off -> falls and bounces
+            col = int(rng.integers(1, GRID_COLS - 1))
+            table_name = f"table{scenario_idx}"
+            ball_name = f"ball{scenario_idx}"
+            world.place(table_name, row=0, col=col)
+            world.place(ball_name, row=1, col=col)
+            direction = "right" if rng.random() < 0.5 else "left"
+            world.push(ball_name, direction=direction)
+
+        elif rule_set == frozenset(
+            {"gravity", "contact", "breakage"}
+        ):
+            # Cup on high stack, push off -> falls >= 2 and breaks
+            col = int(rng.integers(1, GRID_COLS - 1))
+            table_name = f"table{scenario_idx}"
+            shelf_name = f"shelf{scenario_idx}"
+            cup_name = f"cup{scenario_idx}"
+            world.place(table_name, row=0, col=col)
+            world.place(shelf_name, row=1, col=col)
+            world.place(cup_name, row=2, col=col)
+            direction = "right" if rng.random() < 0.5 else "left"
+            world.push(cup_name, direction=direction)
 
         else:
             msg = f"Unsupported rule combination: {rules}"
@@ -568,6 +665,83 @@ def _generate_contact_events(n_events: int, seed: int) -> list[Event]:
         step_events = world.step()
         for e in step_events:
             if e.rule == "contact":
+                events.append(e)
+                if len(events) >= n_events:
+                    break
+
+        scenario_idx += 1
+
+    return events[:n_events]
+
+
+def _generate_bounce_events(n_events: int, seed: int) -> list[Event]:
+    """Generate bounce events from elastic objects falling.
+
+    Creates ball objects at various heights and collects bounce events
+    (upward displacement after landing). Only balls are elastic.
+
+    Args:
+        n_events: Number of events to generate.
+        seed: Random seed.
+
+    Returns:
+        List of bounce events.
+    """
+    rng = np.random.default_rng(seed)
+    events: list[Event] = []
+    scenario_idx = 0
+
+    while len(events) < n_events:
+        world = GridWorld(seed=int(rng.integers(0, 2**31)))
+        name = f"ball{scenario_idx}"
+
+        # Place ball at random height with no support
+        row = int(rng.integers(1, GRID_ROWS))
+        col = int(rng.integers(0, GRID_COLS))
+        world.place(name, row=row, col=col)
+
+        step_events = world.step()
+        for e in step_events:
+            if e.rule == "bounce":
+                events.append(e)
+                if len(events) >= n_events:
+                    break
+
+        scenario_idx += 1
+
+    return events[:n_events]
+
+
+def _generate_breakage_events(n_events: int, seed: int) -> list[Event]:
+    """Generate breakage events from fragile objects falling hard.
+
+    Creates cup objects at heights >= BREAKAGE_THRESHOLD and collects
+    breakage events (state_change="broken"). Also generates negative
+    examples (small falls that don't trigger breakage).
+
+    Args:
+        n_events: Number of events to generate.
+        seed: Random seed.
+
+    Returns:
+        List of breakage events.
+    """
+    rng = np.random.default_rng(seed)
+    events: list[Event] = []
+    scenario_idx = 0
+
+    while len(events) < n_events:
+        world = GridWorld(seed=int(rng.integers(0, 2**31)))
+        name = f"cup{scenario_idx}"
+
+        # Place cup at height >= 2 to ensure breakage
+        row = int(rng.integers(BREAKAGE_THRESHOLD, GRID_ROWS))
+        col = int(rng.integers(0, GRID_COLS))
+        world.place(name, row=row, col=col)
+
+        step_events = world.step()
+        for e in step_events:
+            if e.rule == "breakage":
                 events.append(e)
                 if len(events) >= n_events:
                     break

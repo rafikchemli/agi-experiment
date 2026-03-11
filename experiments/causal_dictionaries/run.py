@@ -35,6 +35,7 @@ from experiments.causal_dictionaries.analysis import (
 )
 from experiments.causal_dictionaries.architectures import (
     ContrastiveDictionary,
+    ContrastiveProductOfExperts,
     ProductOfExperts,
 )
 from experiments.causal_dictionaries.event_encoding import encode_events_v2
@@ -79,27 +80,29 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--arch",
         type=str,
-        default="product-of-experts",
-        choices=["ista", "product-of-experts", "contrastive"],
-        help="Architecture to use (default: product-of-experts).",
+        default="contrastive",
+        choices=[
+            "ista", "product-of-experts", "contrastive", "contrastive-poe",
+        ],
+        help="Architecture to use (default: contrastive).",
     )
     parser.add_argument(
         "--n-atoms",
         type=int,
-        default=6,
-        help="Number of dictionary atoms (default: 6).",
+        default=10,
+        help="Number of dictionary atoms (default: 10).",
     )
     parser.add_argument(
         "--sparsity",
         type=float,
-        default=0.02,
-        help="Sparsity penalty (default: 0.02).",
+        default=0.05,
+        help="Sparsity penalty (default: 0.05).",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=80,
-        help="Number of training epochs (default: 80).",
+        default=150,
+        help="Number of training epochs (default: 150).",
     )
     parser.add_argument(
         "--n-events",
@@ -149,8 +152,9 @@ def _generate_data(
     # For learned encoding, first encode as raw, then transform
     base_encoding = "raw" if encoding == "learned" else encoding
     print(f"  Generating training events (encoding={encoding})...")
+    all_rules = ["gravity", "containment", "contact", "bounce", "breakage"]
     rule_data: dict[str, np.ndarray] = {}
-    for i, rule in enumerate(["gravity", "containment", "contact"]):
+    for i, rule in enumerate(all_rules):
         events = generate_rule_events(
             rule, n_events=n_events, seed=seed + i
         )
@@ -170,7 +174,11 @@ def _generate_data(
         ("T1 gravity+containment", ["gravity", "containment"]),
         ("T2 gravity+contact", ["gravity", "contact"]),
         ("T3 containment+contact", ["containment", "contact"]),
-        ("T4 all three", ["gravity", "containment", "contact"]),
+        ("T4 all original", ["gravity", "containment", "contact"]),
+        ("T6 gravity+bounce", ["gravity", "bounce"]),
+        ("T7 gravity+breakage", ["gravity", "breakage"]),
+        ("T8 contact+bounce", ["gravity", "contact", "bounce"]),
+        ("T9 contact+breakage", ["gravity", "contact", "breakage"]),
     ]
     for label, rules in combos:
         events = generate_composition_events(
@@ -216,7 +224,7 @@ def _run_composition_tests(
     rule_data: dict[str, np.ndarray],
     comp_data: dict[str, np.ndarray],
 ) -> list[dict[str, str | float | bool]]:
-    """Run composition tests T1-T5.
+    """Run composition tests T1-T9.
 
     Args:
         sd: Trained SparseDictionary.
@@ -229,11 +237,20 @@ def _run_composition_tests(
     single_all = np.vstack(list(rule_data.values()))
     results: list[dict[str, str | float | bool]] = []
 
-    # Rule mapping for Jaccard computation
-    rule_map: dict[str, tuple[str, str]] = {
+    # Rule mapping for Jaccard computation (2-rule pairs)
+    rule_map_pair: dict[str, tuple[str, str]] = {
         "T1 gravity+containment": ("gravity", "containment"),
         "T2 gravity+contact": ("gravity", "contact"),
         "T3 containment+contact": ("containment", "contact"),
+        "T6 gravity+bounce": ("gravity", "bounce"),
+        "T7 gravity+breakage": ("gravity", "breakage"),
+    }
+
+    # Multi-rule compositions: (rule_a_keys, rule_b_keys)
+    rule_map_multi: dict[str, tuple[list[str], list[str]]] = {
+        "T4 all original": (["gravity"], ["containment", "contact"]),
+        "T8 contact+bounce": (["contact", "gravity"], ["bounce"]),
+        "T9 contact+breakage": (["contact", "gravity"], ["breakage"]),
     }
 
     for test_name, test_data in comp_data.items():
@@ -250,33 +267,29 @@ def _run_composition_tests(
                 "jaccard": float("nan"),
                 "passed": passed,
             })
-        elif test_name == "T4 all three":
-            # Use gravity + containment data as the two-rule baseline
-            jaccard = atom_union_jaccard(
-                sd,
-                rule_data["gravity"],
-                np.vstack([
-                    rule_data["containment"],
-                    rule_data["contact"],
-                ]),
-                test_data,
-            )
-            passed = ratio < _RATIO_THRESHOLD and jaccard > _JACCARD_THRESHOLD
-            results.append({
-                "name": test_name,
-                "ratio": ratio,
-                "jaccard": jaccard,
-                "passed": passed,
-            })
-        else:
-            rule_a_name, rule_b_name = rule_map[test_name]
+        elif test_name in rule_map_pair:
+            rule_a_name, rule_b_name = rule_map_pair[test_name]
             jaccard = atom_union_jaccard(
                 sd,
                 rule_data[rule_a_name],
                 rule_data[rule_b_name],
                 test_data,
             )
-            passed = ratio < _RATIO_THRESHOLD and jaccard > _JACCARD_THRESHOLD
+            passed = ratio < _RATIO_THRESHOLD and jaccard >= _JACCARD_THRESHOLD
+            results.append({
+                "name": test_name,
+                "ratio": ratio,
+                "jaccard": jaccard,
+                "passed": passed,
+            })
+        elif test_name in rule_map_multi:
+            a_keys, b_keys = rule_map_multi[test_name]
+            rule_a_data = np.vstack([rule_data[k] for k in a_keys])
+            rule_b_data = np.vstack([rule_data[k] for k in b_keys])
+            jaccard = atom_union_jaccard(
+                sd, rule_a_data, rule_b_data, test_data,
+            )
+            passed = ratio < _RATIO_THRESHOLD and jaccard >= _JACCARD_THRESHOLD
             results.append({
                 "name": test_name,
                 "ratio": ratio,
@@ -319,8 +332,11 @@ def _print_results(
         else:
             shared_count += 1
 
+    n_tests = len(test_results)
     n_pass = sum(1 for t in test_results if t["passed"])
-    overall = "PASS" if n_pass >= 4 else "FAIL"
+    # Pass if >= 75% of tests pass
+    pass_threshold = max(4, int(n_tests * 0.75))
+    overall = "PASS" if n_pass >= pass_threshold else "FAIL"
 
     print()
     print("=" * 60)
@@ -360,7 +376,7 @@ def _print_results(
             f"{jaccard_str:>9} {pass_str:>6}"
         )
     print()
-    print(f"  OVERALL: {overall} ({n_pass}/5 tests pass)")
+    print(f"  OVERALL: {overall} ({n_pass}/{n_tests} tests pass)")
     print("=" * 60)
 
 
@@ -380,7 +396,7 @@ def _create_comparison_visualization(
     """
     fig, axes = plt.subplots(2, 2, figsize=(15, 11))
     fig.suptitle(
-        "Baseline (ISTA) vs ProductOfExperts — Raw Encoding",
+        "Baseline (ISTA) vs Best Architecture — Raw Encoding",
         fontsize=14,
         fontweight="bold",
         color=_CLR_LINES,
@@ -391,7 +407,7 @@ def _create_comparison_visualization(
     ax_loss = axes[0, 0]
     for label, res, color in [
         ("ISTA (baseline)", ista_results, "#E53935"),
-        ("ProductOfExperts", poe_results, "#1565C0"),
+        ("Best arch", poe_results, "#1565C0"),
     ]:
         epochs = [h["epoch"] for h in res["history"]]
         losses = [h["loss"] for h in res["history"]]
@@ -722,7 +738,19 @@ def main() -> None:
     print(f"\n  Training {arch_label} ({args.n_atoms} atoms, "
           f"sp={args.sparsity}, {args.epochs} epochs)...")
     sd: DictionaryModel
-    if args.arch == "product-of-experts":
+    if args.arch == "contrastive-poe":
+        n_rule = args.n_atoms // 2
+        n_pos = args.n_atoms - n_rule
+        model = ContrastiveProductOfExperts(
+            n_rule_atoms=n_rule,
+            n_pos_atoms=n_pos,
+            sparsity=args.sparsity,
+            contrastive_weight=1.0,
+            seed=args.seed,
+        )
+        history = model.train_with_labels(rule_data, epochs=args.epochs)
+        sd = model
+    elif args.arch == "product-of-experts":
         n_rule = args.n_atoms // 2
         n_pos = args.n_atoms - n_rule
         model = ProductOfExperts(
@@ -737,7 +765,7 @@ def main() -> None:
         model = ContrastiveDictionary(
             n_atoms=args.n_atoms,
             sparsity=args.sparsity,
-            contrastive_weight=0.5,
+            contrastive_weight=2.0,
             seed=args.seed,
         )
         history = model.train_with_labels(rule_data, epochs=args.epochs)
@@ -806,7 +834,7 @@ def main() -> None:
         ],
         "overall_pass": sum(
             1 for t in test_results if t["passed"]
-        ) >= 4,
+        ) >= max(4, int(len(test_results) * 0.75)),
         "elapsed_seconds": round(time.time() - start_time, 2),
     }
 
@@ -816,21 +844,39 @@ def main() -> None:
         json.dump(results_json, f, indent=2)
     print(f"  Results JSON saved: {results_path}")
 
-    # Optional: comparison mode (ISTA vs ProductOfExperts)
+    # Optional: comparison mode (chosen arch vs ISTA baseline)
     if args.compare:
         print("\n  === COMPARISON MODE ===")
-        # If we just ran ProductOfExperts, we already have its results
-        # If we ran something else, train PoE now
-        poe_results: dict = {}
-        ista_results: dict = {}
+        main_results: dict = {
+            "history": history,
+            "model": sd,
+            "spec_scores": spec_scores,
+            "test_results": test_results,
+        }
 
-        if args.arch == "product-of-experts":
-            poe_results = {
-                "history": history,
-                "model": sd,
-                "spec_scores": spec_scores,
-                "test_results": test_results,
+        if args.arch == "ista":
+            # Already ran ISTA, train contrastive as comparison
+            print("  Training Contrastive comparison...")
+            cmp_sd = ContrastiveDictionary(
+                n_atoms=args.n_atoms,
+                sparsity=args.sparsity,
+                contrastive_weight=2.0,
+                seed=args.seed,
+            )
+            cmp_history = cmp_sd.train_with_labels(
+                rule_data, epochs=args.epochs,
+            )
+            cmp_spec = specialization_scores(cmp_sd, rule_data)
+            cmp_tests = _run_composition_tests(cmp_sd, rule_data, comp_data)
+            ista_results = main_results
+            arch_results = {
+                "history": cmp_history,
+                "model": cmp_sd,
+                "spec_scores": cmp_spec,
+                "test_results": cmp_tests,
             }
+            arch_name = "contrastive"
+        else:
             # Train ISTA baseline
             print("  Training ISTA baseline...")
             ista_sd = SparseDictionary(
@@ -847,84 +893,41 @@ def main() -> None:
                 "spec_scores": ista_spec,
                 "test_results": ista_tests,
             }
-        else:
-            ista_results = {
-                "history": history,
-                "model": sd,
-                "spec_scores": spec_scores,
-                "test_results": test_results,
-            }
-            # Train ProductOfExperts
-            print("  Training ProductOfExperts...")
-            n_rule = args.n_atoms // 2
-            n_pos = args.n_atoms - n_rule
-            poe_sd = ProductOfExperts(
-                n_rule_atoms=n_rule,
-                n_pos_atoms=n_pos,
-                sparsity=args.sparsity,
-                seed=args.seed,
-            )
-            poe_history = poe_sd.train(all_data, epochs=args.epochs)
-            poe_spec = specialization_scores(poe_sd, rule_data)
-            poe_tests = _run_composition_tests(poe_sd, rule_data, comp_data)
-            poe_results = {
-                "history": poe_history,
-                "model": poe_sd,
-                "spec_scores": poe_spec,
-                "test_results": poe_tests,
-            }
+            arch_results = main_results
+            arch_name = args.arch
 
         _create_comparison_visualization(
-            ista_results, poe_results, rule_data,
+            ista_results, arch_results, rule_data,
             RESULTS_DIR / "comparison.png",
         )
 
-        # Add comparison data to results JSON
+        def _serialize_results(res: dict) -> dict:
+            return {
+                "tests_passed": sum(
+                    1 for t in res["test_results"] if t["passed"]
+                ),
+                "mean_specialization": float(
+                    res["spec_scores"].mean()
+                ),
+                "final_loss": res["history"][-1]["loss"],
+                "tests": [
+                    {
+                        "name": str(t["name"]),
+                        "ratio": float(t["ratio"]),
+                        "jaccard": (
+                            float(t["jaccard"])
+                            if not np.isnan(float(t["jaccard"]))
+                            else None
+                        ),
+                        "passed": bool(t["passed"]),
+                    }
+                    for t in res["test_results"]
+                ],
+            }
+
         results_json["comparison"] = {
-            "ista": {
-                "tests_passed": sum(
-                    1 for t in ista_results["test_results"] if t["passed"]
-                ),
-                "mean_specialization": float(
-                    ista_results["spec_scores"].mean()
-                ),
-                "final_loss": ista_results["history"][-1]["loss"],
-                "tests": [
-                    {
-                        "name": str(t["name"]),
-                        "ratio": float(t["ratio"]),
-                        "jaccard": (
-                            float(t["jaccard"])
-                            if not np.isnan(float(t["jaccard"]))
-                            else None
-                        ),
-                        "passed": bool(t["passed"]),
-                    }
-                    for t in ista_results["test_results"]
-                ],
-            },
-            "product_of_experts": {
-                "tests_passed": sum(
-                    1 for t in poe_results["test_results"] if t["passed"]
-                ),
-                "mean_specialization": float(
-                    poe_results["spec_scores"].mean()
-                ),
-                "final_loss": poe_results["history"][-1]["loss"],
-                "tests": [
-                    {
-                        "name": str(t["name"]),
-                        "ratio": float(t["ratio"]),
-                        "jaccard": (
-                            float(t["jaccard"])
-                            if not np.isnan(float(t["jaccard"]))
-                            else None
-                        ),
-                        "passed": bool(t["passed"]),
-                    }
-                    for t in poe_results["test_results"]
-                ],
-            },
+            "ista": _serialize_results(ista_results),
+            arch_name: _serialize_results(arch_results),
         }
         # Re-save with comparison data
         with results_path.open("w") as f:

@@ -2,13 +2,13 @@
 
 Converts Event dataclass instances into flat binary numpy vectors
 suitable for sparse dictionary learning. Each event is encoded as a
-62-dimensional binary vector with exactly 5 ones (one per field).
+64-dimensional binary vector with exactly 5 ones (one per field).
 
-Encoding layout (62 dimensions total):
+Encoding layout (64 dimensions total):
   - obj_type:     5 dims  (one-hot over object types)
   - pos_before:  25 dims  (one-hot over 5x5 grid, row*5+col)
   - pos_after:   25 dims  (one-hot over 5x5 grid, row*5+col)
-  - action:       4 dims  (one-hot over action types)
+  - action:       6 dims  (one-hot over action types)
   - state_change: 3 dims  (one-hot over state change types)
 """
 
@@ -22,17 +22,19 @@ if TYPE_CHECKING:
     from experiments.causal_dictionaries.micro_world import Event
 
 OBJ_TYPES: list[str] = ["ball", "cup", "box", "shelf", "table"]
-ACTIONS: list[str] = ["gravity_fall", "contained_move", "push", "none"]
+ACTIONS: list[str] = [
+    "gravity_fall", "contained_move", "push", "none", "bounce", "break_on_impact",
+]
 STATE_CHANGES: list[str] = ["intact", "broken", "unchanged"]
 GRID_SIZE: int = 5
-VECTOR_DIM: int = 62  # 5 + 25 + 25 + 4 + 3
+VECTOR_DIM: int = 64  # 5 + 25 + 25 + 6 + 3
 
 # Precompute field offsets for the flat vector layout.
 _OFFSET_OBJ_TYPE: int = 0
 _OFFSET_POS_BEFORE: int = 5
 _OFFSET_POS_AFTER: int = 30
 _OFFSET_ACTION: int = 55
-_OFFSET_STATE_CHANGE: int = 59
+_OFFSET_STATE_CHANGE: int = 61
 
 
 def encode_event(event: Event) -> np.ndarray:
@@ -112,22 +114,22 @@ def encode_event_enriched(event: Event) -> np.ndarray:
     return np.concatenate([base, [dr, dc, mag, changed, height]])
 
 
-VECTOR_DIM_ENRICHED: int = VECTOR_DIM + 5  # 67
+VECTOR_DIM_ENRICHED: int = VECTOR_DIM + 5  # 69
 
 
 def encode_event_compact(event: Event) -> np.ndarray:
     """Compact encoding: continuous positions + displacement.
 
     Replaces 50-dim one-hot positions with 7 continuous dims.
-    Total: 19 dims. Causal features dominate.
+    Total: 21 dims. Causal features dominate.
 
     Args:
         event: An Event dataclass instance.
 
     Returns:
-        A (19,) float64 numpy array.
+        A (21,) float64 numpy array.
     """
-    vec = np.zeros(19, dtype=np.float64)
+    vec = np.zeros(VECTOR_DIM_COMPACT, dtype=np.float64)
     # obj_type one-hot: [0:5]
     vec[_lookup(OBJ_TYPES, event.obj_type, "obj_type")] = 1.0
     r_b, c_b = event.pos_before
@@ -141,14 +143,14 @@ def encode_event_compact(event: Event) -> np.ndarray:
     vec[9] = np.sqrt(vec[7] ** 2 + vec[8] ** 2)  # magnitude
     vec[10] = float(event.pos_before != event.pos_after)  # changed
     vec[11] = r_b / scale  # height (= pos_before_row, explicit for gravity)
-    # action one-hot: [12:16]
+    # action one-hot: [12:18]
     vec[12 + _lookup(ACTIONS, event.action, "action")] = 1.0
-    # state_change one-hot: [16:19]
-    vec[16 + _lookup(STATE_CHANGES, event.state_change, "state_change")] = 1.0
+    # state_change one-hot: [18:21]
+    vec[18 + _lookup(STATE_CHANGES, event.state_change, "state_change")] = 1.0
     return vec
 
 
-VECTOR_DIM_COMPACT: int = 19
+VECTOR_DIM_COMPACT: int = 21
 
 
 def encode_event_raw(event: Event) -> np.ndarray:
@@ -159,18 +161,18 @@ def encode_event_raw(event: Event) -> np.ndarray:
     positions). No displacement, magnitude, height, or changed flag —
     the model must discover these relationships itself.
 
-    Layout (16 dimensions):
+    Layout (18 dimensions):
       - obj_type:     5 dims  (one-hot)
       - pos_before:   2 dims  (normalized row, col)
       - pos_after:    2 dims  (normalized row, col)
-      - action:       4 dims  (one-hot)
+      - action:       6 dims  (one-hot)
       - state_change: 3 dims  (one-hot)
 
     Args:
         event: An Event dataclass instance.
 
     Returns:
-        A (16,) float64 numpy array.
+        A (18,) float64 numpy array.
     """
     vec = np.zeros(VECTOR_DIM_RAW, dtype=np.float64)
     # obj_type one-hot: [0:5]
@@ -183,14 +185,14 @@ def encode_event_raw(event: Event) -> np.ndarray:
     vec[6] = c_b / scale
     vec[7] = r_a / scale
     vec[8] = c_a / scale
-    # action one-hot: [9:13]
+    # action one-hot: [9:15]
     vec[9 + _lookup(ACTIONS, event.action, "action")] = 1.0
-    # state_change one-hot: [13:16]
-    vec[13 + _lookup(STATE_CHANGES, event.state_change, "state_change")] = 1.0
+    # state_change one-hot: [15:18]
+    vec[15 + _lookup(STATE_CHANGES, event.state_change, "state_change")] = 1.0
     return vec
 
 
-VECTOR_DIM_RAW: int = 16
+VECTOR_DIM_RAW: int = 18
 
 
 def encode_events_v2(

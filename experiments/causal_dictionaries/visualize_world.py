@@ -135,12 +135,12 @@ def _draw_arrow(
 def visualize_rule_examples(output_path: Path | None = None) -> None:
     """Generate a figure showing example events for each rule.
 
-    Creates a 3-row figure (one per rule), each showing before → after.
+    Creates a 5-row figure (one per rule), each showing before → after.
     """
-    fig, axes = plt.subplots(3, 2, figsize=(10, 12))
+    fig, axes = plt.subplots(5, 2, figsize=(10, 20))
     fig.suptitle(
-        "Micro-World: Three Physical Rules",
-        fontsize=14, fontweight="bold", y=0.98,
+        "Micro-World: Five Physical Rules",
+        fontsize=14, fontweight="bold", y=0.99,
     )
 
     # ── Gravity example ──
@@ -148,14 +148,13 @@ def visualize_rule_examples(output_path: Path | None = None) -> None:
     _draw_grid(ax_before, "GRAVITY — Before")
     _draw_grid(ax_after, "GRAVITY — After")
 
-    # Ball at height 3 with no support
     _draw_object(ax_before, "ball", "ball", 3, 2)
     _draw_object(ax_before, "table", "table", 0, 4)
-    _draw_object(ax_before, "cup", "cup", 1, 4)  # cup on table (supported)
+    _draw_object(ax_before, "cup", "cup", 1, 4)
 
-    _draw_object(ax_after, "ball", "ball", 0, 2)  # fell to floor
+    _draw_object(ax_after, "ball", "ball", 0, 2)
     _draw_object(ax_after, "table", "table", 0, 4)
-    _draw_object(ax_after, "cup", "cup", 1, 4)  # stayed (supported)
+    _draw_object(ax_after, "cup", "cup", 1, 4)
 
     _draw_arrow(ax_after, (3, 2), (0, 2), "#E53935")
     ax_after.text(
@@ -173,7 +172,7 @@ def visualize_rule_examples(output_path: Path | None = None) -> None:
     _draw_grid(ax_after, "CONTAINMENT — After (push box right)")
 
     _draw_object(ax_before, "box", "box", 0, 1)
-    _draw_object(ax_before, "ball", "ball", 0, 1, alpha=0.8)  # inside box
+    _draw_object(ax_before, "ball", "ball", 0, 1, alpha=0.8)
     ax_before.text(
         1, -0.15, "(ball inside box)",
         fontsize=7, ha="center", color="#999", style="italic",
@@ -184,28 +183,85 @@ def visualize_rule_examples(output_path: Path | None = None) -> None:
 
     _draw_arrow(ax_after, (0, 1), (0, 2), "#43A047")
     ax_after.text(
-        1.5, 0.5, "box pushed →\nball follows!",
+        1.5, 0.5, "box pushed \u2192\nball follows!",
         fontsize=8, ha="center", color="#43A047", style="italic",
     )
 
     # ── Contact example ──
     ax_before, ax_after = axes[2]
     _draw_grid(ax_before, "CONTACT — Before")
-    _draw_grid(ax_after, "CONTACT — After (push ball right)")
+    _draw_grid(ax_after, "CONTACT — After (push box right)")
 
     _draw_object(ax_before, "table", "table", 0, 2)
-    _draw_object(ax_before, "ball", "ball", 1, 2)
+    _draw_object(ax_before, "box", "box", 1, 2)
 
     _draw_object(ax_after, "table", "table", 0, 2)
-    _draw_object(ax_after, "ball", "ball", 1, 3)
+    _draw_object(ax_after, "box", "box", 1, 3)
 
     _draw_arrow(ax_after, (1, 2), (1, 3), "#FF6F00")
     ax_after.text(
-        2.5, 1.7, "pushed →",
+        2.5, 1.7, "pushed \u2192",
         fontsize=8, ha="center", color="#FF6F00", style="italic",
     )
 
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    # ── Bounce example ──
+    ax_before, ax_after = axes[3]
+    _draw_grid(ax_before, "BOUNCE — Before")
+    _draw_grid(ax_after, "BOUNCE — After (ball falls, then bounces)")
+
+    _draw_object(ax_before, "ball", "ball", 3, 2)
+
+    # Ball falls to floor (row 0), then bounces up 1 (row 1)
+    _draw_object(ax_after, "ball", "ball", 1, 2)
+
+    _draw_arrow(ax_after, (3, 2), (0, 2), "#E53935")
+    _draw_arrow(ax_after, (0, 2), (1, 2), "#AB47BC")
+    ax_after.text(
+        1.5, 1.5, "falls to floor",
+        fontsize=8, ha="center", color="#E53935", style="italic",
+    )
+    ax_after.text(
+        3.0, 0.5, "bounces up!\n(elastic)",
+        fontsize=8, ha="center", color="#AB47BC", style="italic",
+    )
+    ax_after.text(
+        2, 3.5, "only balls bounce",
+        fontsize=7, ha="center", color="#777", style="italic",
+    )
+
+    # ── Breakage example ──
+    ax_before, ax_after = axes[4]
+    _draw_grid(ax_before, "BREAKAGE — Before")
+    _draw_grid(ax_after, "BREAKAGE — After (cup falls \u2265 2 rows)")
+
+    _draw_object(ax_before, "cup", "cup", 3, 2)
+
+    # Cup falls from row 3 to row 0 (distance 3 >= threshold 2) -> breaks
+    _draw_object(ax_after, "cup", "cup", 0, 2, alpha=0.5)
+
+    _draw_arrow(ax_after, (3, 2), (0, 2), "#E53935")
+    ax_after.text(
+        1.5, 1.5, "falls 3 rows",
+        fontsize=8, ha="center", color="#E53935", style="italic",
+    )
+    ax_after.text(
+        3.0, 0.5, "BROKEN!\n(fall \u2265 2)",
+        fontsize=8, ha="center", color="#C62828", fontweight="bold",
+        style="italic",
+    )
+    ax_after.text(
+        2, 3.5, "only cups break",
+        fontsize=7, ha="center", color="#777", style="italic",
+    )
+    # Draw an X over the broken cup
+    ax_after.plot(
+        [1.7, 2.3], [-0.3, 0.3], color="#C62828", linewidth=3, alpha=0.7,
+    )
+    ax_after.plot(
+        [1.7, 2.3], [0.3, -0.3], color="#C62828", linewidth=3, alpha=0.7,
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
 
     if output_path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,7 +275,10 @@ def visualize_rule_examples(output_path: Path | None = None) -> None:
 
 def visualize_event_distribution(output_path: Path | None = None) -> None:
     """Show the distribution of generated events across rules."""
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    rules = ["gravity", "containment", "contact", "bounce", "breakage"]
+    colors = ["#E53935", "#43A047", "#1E88E5", "#AB47BC", "#C62828"]
+
+    fig, axes = plt.subplots(1, len(rules), figsize=(18, 4))
     fig.suptitle(
         "Event Generation: 500 Events Per Rule",
         fontsize=13, fontweight="bold",
@@ -227,8 +286,8 @@ def visualize_event_distribution(output_path: Path | None = None) -> None:
 
     for ax, rule, color in zip(
         axes,
-        ["gravity", "containment", "contact"],
-        ["#E53935", "#43A047", "#1E88E5"],
+        rules,
+        colors,
         strict=True,
     ):
         events = generate_rule_events(rule, n_events=500, seed=42)
