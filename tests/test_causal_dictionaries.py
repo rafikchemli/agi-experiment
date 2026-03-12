@@ -211,7 +211,7 @@ class TestEventEncoding:
             state_change="unchanged",
         )
         vec = encode_event(event)
-        assert vec.shape == (62,)
+        assert vec.shape == (64,)
         assert vec.dtype == np.float64
         assert set(np.unique(vec)).issubset({0.0, 1.0})
         assert vec.sum() == 5.0
@@ -226,7 +226,7 @@ class TestEventEncoding:
 
         events = generate_rule_events("gravity", n_events=50, seed=42)
         matrix = encode_events(events)
-        assert matrix.shape == (50, 62)
+        assert matrix.shape == (50, 64)
         assert np.all(matrix.sum(axis=1) == 5.0)
 
     def test_different_events_produce_different_vectors(self) -> None:
@@ -295,7 +295,7 @@ class TestSparseDictionary:
         sd.train(data, epochs=10)
         codes = sd.encode(data[:10])
         assert codes.shape == (10, 20)
-        # With 20 atoms on 62-dim binary data, expect many near-zero
+        # With 20 atoms on 64-dim binary data, expect many near-zero
         sparsity = (np.abs(codes) < 0.1).mean()
         assert sparsity > 0.3
 
@@ -332,7 +332,7 @@ class TestSparseDictionary:
         data = encode_events(events)
         sd = SparseDictionary(n_atoms=25, seed=42)
         sd.train(data, epochs=5)
-        assert sd.dictionary.shape == (62, 25)
+        assert sd.dictionary.shape == (64, 25)
 
 
 class TestAnalysis:
