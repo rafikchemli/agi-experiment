@@ -27,7 +27,11 @@ ACTIONS: list[str] = [
 ]
 STATE_CHANGES: list[str] = ["intact", "broken", "unchanged"]
 GRID_SIZE: int = 5
-VECTOR_DIM: int = 64  # 5 + 25 + 25 + 6 + 3
+VECTOR_DIM: int = 64          # 5 + 25 + 25 + 6 + 3
+VECTOR_DIM_ENRICHED: int = 69  # VECTOR_DIM + 5 continuous features
+VECTOR_DIM_COMPACT: int = 21   # 5 + 7 continuous + 6 + 3
+VECTOR_DIM_RAW: int = 18       # 5 + 2 + 2 + 6 + 3
+_GRID_SCALE: float = float(GRID_SIZE - 1)  # 4.0
 
 # Precompute field offsets for the flat vector layout.
 _OFFSET_OBJ_TYPE: int = 0
@@ -44,7 +48,7 @@ def encode_event(event: Event) -> np.ndarray:
         event: An Event dataclass instance from the micro-world simulator.
 
     Returns:
-        A (62,) float64 numpy array with exactly 5 ones and 57 zeros.
+        A (64,) float64 numpy array with exactly 5 ones and 59 zeros.
 
     Raises:
         ValueError: If any event field contains an unknown category.
@@ -81,8 +85,8 @@ def encode_events(events: list[Event]) -> np.ndarray:
         events: List of Event dataclass instances.
 
     Returns:
-        An (N, 62) float64 numpy array where N is the number of events.
-        Each row has exactly 5 ones and 57 zeros.
+        An (N, 64) float64 numpy array where N is the number of events.
+        Each row has exactly 5 ones and 59 zeros.
     """
     n = len(events)
     matrix = np.zeros((n, VECTOR_DIM), dtype=np.float64)
@@ -95,26 +99,23 @@ def encode_event_enriched(event: Event) -> np.ndarray:
     """Encode an event with displacement and height features.
 
     Adds continuous features that directly capture causal structure:
-    displacement, magnitude, height. Total: 67 dims.
+    displacement, magnitude, height. Total: 69 dims.
 
     Args:
         event: An Event dataclass instance.
 
     Returns:
-        A (67,) float64 numpy array.
+        A (69,) float64 numpy array.
     """
     base = encode_event(event)
     r_b, c_b = event.pos_before
     r_a, c_a = event.pos_after
-    dr = (r_a - r_b) / max(GRID_SIZE - 1, 1)
-    dc = (c_a - c_b) / max(GRID_SIZE - 1, 1)
+    dr = (r_a - r_b) / _GRID_SCALE
+    dc = (c_a - c_b) / _GRID_SCALE
     mag = np.sqrt(dr**2 + dc**2)
     changed = float(event.pos_before != event.pos_after)
-    height = r_b / max(GRID_SIZE - 1, 1)
+    height = r_b / _GRID_SCALE
     return np.concatenate([base, [dr, dc, mag, changed, height]])
-
-
-VECTOR_DIM_ENRICHED: int = VECTOR_DIM + 5  # 69
 
 
 def encode_event_compact(event: Event) -> np.ndarray:
@@ -134,23 +135,19 @@ def encode_event_compact(event: Event) -> np.ndarray:
     vec[_lookup(OBJ_TYPES, event.obj_type, "obj_type")] = 1.0
     r_b, c_b = event.pos_before
     r_a, c_a = event.pos_after
-    scale = max(GRID_SIZE - 1, 1)
     # continuous position features: [5:12]
-    vec[5] = r_b / scale
-    vec[6] = c_b / scale
-    vec[7] = (r_a - r_b) / scale  # displacement row
-    vec[8] = (c_a - c_b) / scale  # displacement col
+    vec[5] = r_b / _GRID_SCALE
+    vec[6] = c_b / _GRID_SCALE
+    vec[7] = (r_a - r_b) / _GRID_SCALE  # displacement row
+    vec[8] = (c_a - c_b) / _GRID_SCALE  # displacement col
     vec[9] = np.sqrt(vec[7] ** 2 + vec[8] ** 2)  # magnitude
     vec[10] = float(event.pos_before != event.pos_after)  # changed
-    vec[11] = r_b / scale  # height (= pos_before_row, explicit for gravity)
+    vec[11] = r_b / _GRID_SCALE  # height (explicit for gravity detection)
     # action one-hot: [12:18]
     vec[12 + _lookup(ACTIONS, event.action, "action")] = 1.0
     # state_change one-hot: [18:21]
     vec[18 + _lookup(STATE_CHANGES, event.state_change, "state_change")] = 1.0
     return vec
-
-
-VECTOR_DIM_COMPACT: int = 21
 
 
 def encode_event_raw(event: Event) -> np.ndarray:
@@ -179,20 +176,16 @@ def encode_event_raw(event: Event) -> np.ndarray:
     vec[_lookup(OBJ_TYPES, event.obj_type, "obj_type")] = 1.0
     r_b, c_b = event.pos_before
     r_a, c_a = event.pos_after
-    scale = max(GRID_SIZE - 1, 1)
     # raw positions: [5:9]
-    vec[5] = r_b / scale
-    vec[6] = c_b / scale
-    vec[7] = r_a / scale
-    vec[8] = c_a / scale
+    vec[5] = r_b / _GRID_SCALE
+    vec[6] = c_b / _GRID_SCALE
+    vec[7] = r_a / _GRID_SCALE
+    vec[8] = c_a / _GRID_SCALE
     # action one-hot: [9:15]
     vec[9 + _lookup(ACTIONS, event.action, "action")] = 1.0
     # state_change one-hot: [15:18]
     vec[15 + _lookup(STATE_CHANGES, event.state_change, "state_change")] = 1.0
     return vec
-
-
-VECTOR_DIM_RAW: int = 18
 
 
 def encode_events_v2(

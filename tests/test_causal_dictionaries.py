@@ -51,11 +51,11 @@ class TestGridWorld:
         world.push("box", direction="right")
         events = world.step()
 
-        box_events = [e for e in events if e.obj_name == "box"]
-        ball_events = [e for e in events if e.obj_name == "ball"]
-        assert len(box_events) >= 1
-        assert len(ball_events) >= 1
-        assert ball_events[0].pos_after == box_events[0].pos_after
+        box_contact = [e for e in events if e.obj_name == "box" and e.rule == "contact"]
+        ball_contain = [e for e in events if e.obj_name == "ball" and e.rule == "containment"]
+        assert len(box_contact) >= 1
+        assert len(ball_contain) >= 1
+        assert ball_contain[0].pos_after == box_contact[0].pos_after
 
     def test_contact_push_moves_object(self) -> None:
         from experiments.causal_dictionaries.micro_world import GridWorld
@@ -183,6 +183,46 @@ class TestEventGeneration:
         assert len(positive) > 0, "Should have positive gravity events"
         assert len(negative) > 0, "Should have negative gravity events"
 
+    def test_generate_bounce_events(self) -> None:
+        from experiments.causal_dictionaries.micro_world import (
+            generate_rule_events,
+        )
+
+        events = generate_rule_events("bounce", n_events=60, seed=42)
+        assert len(events) == 60
+
+    def test_generate_breakage_events(self) -> None:
+        from experiments.causal_dictionaries.micro_world import (
+            generate_rule_events,
+        )
+
+        events = generate_rule_events("breakage", n_events=60, seed=42)
+        assert len(events) == 60
+
+    def test_bounce_events_include_negatives(self) -> None:
+        """Bounce generation should include non-bounce events (floor scenarios)."""
+        from experiments.causal_dictionaries.micro_world import (
+            generate_rule_events,
+        )
+
+        events = generate_rule_events("bounce", n_events=90, seed=42)
+        bounce_events = [e for e in events if e.rule == "bounce"]
+        non_bounce = [e for e in events if e.rule != "bounce"]
+        assert len(bounce_events) > 0, "Should have positive bounce events"
+        assert len(non_bounce) > 0, "Should have negative (non-bounce) events"
+
+    def test_breakage_events_include_negatives(self) -> None:
+        """Breakage generation should include events where cup doesn't break."""
+        from experiments.causal_dictionaries.micro_world import (
+            generate_rule_events,
+        )
+
+        events = generate_rule_events("breakage", n_events=90, seed=42)
+        break_events = [e for e in events if e.rule == "breakage"]
+        no_break = [e for e in events if e.rule != "breakage"]
+        assert len(break_events) > 0, "Should have positive breakage events"
+        assert len(no_break) > 0, "Should have negative (no-breakage) events"
+
     def test_generate_invalid_rule_raises(self) -> None:
         from experiments.causal_dictionaries.micro_world import (
             generate_rule_events,
@@ -228,6 +268,57 @@ class TestEventEncoding:
         matrix = encode_events(events)
         assert matrix.shape == (50, 64)
         assert np.all(matrix.sum(axis=1) == 5.0)
+
+    def test_encode_event_raw_shape_and_range(self) -> None:
+        from experiments.causal_dictionaries.event_encoding import encode_event_raw
+        from experiments.causal_dictionaries.micro_world import Event
+
+        event = Event(
+            obj_name="ball",
+            obj_type="ball",
+            pos_before=(3, 2),
+            pos_after=(0, 2),
+            rule="gravity",
+            action="gravity_fall",
+            state_change="unchanged",
+        )
+        vec = encode_event_raw(event)
+        assert vec.shape == (18,)
+        assert vec.dtype == np.float64
+        assert np.all(vec >= 0.0)
+        assert np.all(vec <= 1.0)
+
+    def test_encode_event_compact_shape(self) -> None:
+        from experiments.causal_dictionaries.event_encoding import encode_event_compact
+        from experiments.causal_dictionaries.micro_world import Event
+
+        event = Event(
+            obj_name="cup",
+            obj_type="cup",
+            pos_before=(2, 1),
+            pos_after=(0, 1),
+            rule="gravity",
+            action="gravity_fall",
+            state_change="unchanged",
+        )
+        vec = encode_event_compact(event)
+        assert vec.shape == (21,)
+
+    def test_encode_events_v2_raw(self) -> None:
+        from experiments.causal_dictionaries.event_encoding import encode_events_v2
+        from experiments.causal_dictionaries.micro_world import generate_rule_events
+
+        events = generate_rule_events("gravity", n_events=20, seed=42)
+        matrix = encode_events_v2(events, encoding="raw")
+        assert matrix.shape == (20, 18)
+
+    def test_encode_events_v2_compact(self) -> None:
+        from experiments.causal_dictionaries.event_encoding import encode_events_v2
+        from experiments.causal_dictionaries.micro_world import generate_rule_events
+
+        events = generate_rule_events("contact", n_events=20, seed=42)
+        matrix = encode_events_v2(events, encoding="compact")
+        assert matrix.shape == (20, 21)
 
     def test_different_events_produce_different_vectors(self) -> None:
         from experiments.causal_dictionaries.event_encoding import (
@@ -383,6 +474,84 @@ class TestAnalysis:
         assert scores.shape == (30,)
         assert np.all(scores >= 1.0 / 3.0 - 0.01)
         assert np.all(scores <= 1.0 + 0.01)
+
+
+class TestArchitectures:
+    """Test alternative architecture classes."""
+
+    def _make_data(self) -> tuple[dict[str, np.ndarray], np.ndarray]:
+        from experiments.causal_dictionaries.event_encoding import encode_events_v2
+        from experiments.causal_dictionaries.micro_world import generate_rule_events
+
+        rule_data = {}
+        for i, rule in enumerate(["gravity", "containment", "contact"]):
+            events = generate_rule_events(rule, n_events=100, seed=42 + i)
+            rule_data[rule] = encode_events_v2(events, encoding="raw")
+        all_data = np.vstack(list(rule_data.values()))
+        return rule_data, all_data
+
+    def test_contrastive_trains_and_reduces_loss(self) -> None:
+        from experiments.causal_dictionaries.architectures import ContrastiveDictionary
+
+        rule_data, _ = self._make_data()
+        cd = ContrastiveDictionary(n_atoms=6, seed=42)
+        history = cd.train_with_labels(rule_data, epochs=5)
+        assert history[-1]["loss"] < history[0]["loss"]
+
+    def test_contrastive_encode_shape(self) -> None:
+        from experiments.causal_dictionaries.architectures import ContrastiveDictionary
+
+        rule_data, all_data = self._make_data()
+        cd = ContrastiveDictionary(n_atoms=6, seed=42)
+        cd.train_with_labels(rule_data, epochs=3)
+        codes = cd.encode(all_data[:10])
+        assert codes.shape == (10, 6)
+
+    def test_contrastive_raises_before_training(self) -> None:
+        from experiments.causal_dictionaries.architectures import ContrastiveDictionary
+
+        cd = ContrastiveDictionary(n_atoms=6, seed=42)
+        _, all_data = self._make_data()
+        with pytest.raises(RuntimeError, match="not trained"):
+            cd.encode(all_data[:5])
+        with pytest.raises(RuntimeError, match="not trained"):
+            cd.reconstruction_error(all_data[:5])
+        with pytest.raises(RuntimeError, match="not trained"):
+            _ = cd.dictionary
+
+    def test_product_of_experts_trains(self) -> None:
+        from experiments.causal_dictionaries.architectures import ProductOfExperts
+
+        _, all_data = self._make_data()
+        poe = ProductOfExperts(n_rule_atoms=3, n_pos_atoms=3, seed=42)
+        history = poe.train(all_data, epochs=5)
+        assert len(history) == 5
+        assert history[-1]["loss"] < history[0]["loss"]
+
+    def test_product_of_experts_encode_shape(self) -> None:
+        from experiments.causal_dictionaries.architectures import ProductOfExperts
+
+        _, all_data = self._make_data()
+        poe = ProductOfExperts(n_rule_atoms=3, n_pos_atoms=4, seed=42)
+        poe.train(all_data, epochs=3)
+        codes = poe.encode(all_data[:10])
+        assert codes.shape == (10, 7)  # 3 + 4
+
+    def test_product_of_experts_dictionary_shape(self) -> None:
+        from experiments.causal_dictionaries.architectures import ProductOfExperts
+
+        _, all_data = self._make_data()
+        poe = ProductOfExperts(n_rule_atoms=3, n_pos_atoms=3, seed=42)
+        poe.train(all_data, epochs=3)
+        assert poe.dictionary.shape == (18, 6)  # input_dim=18, n_atoms=6
+
+    def test_product_of_experts_raises_before_training(self) -> None:
+        from experiments.causal_dictionaries.architectures import ProductOfExperts
+
+        _, all_data = self._make_data()
+        poe = ProductOfExperts(n_rule_atoms=3, n_pos_atoms=3, seed=42)
+        with pytest.raises(RuntimeError, match="not trained"):
+            poe.encode(all_data[:5])
 
 
 class TestCompositionEvents:

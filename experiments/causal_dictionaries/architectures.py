@@ -23,26 +23,69 @@ from __future__ import annotations
 
 import numpy as np
 
+# Hard cap on sparse code activations.
+_Z_CLIP: float = 5.0
+
+
+def _run_ista(
+    x: np.ndarray,
+    d: np.ndarray,
+    n_atoms: int,
+    n_settle: int,
+    infer_rate: float,
+    sparsity: float,
+) -> np.ndarray:
+    """Run ISTA settling to infer sparse codes for a single codebook.
+
+    Args:
+        x: Input batch of shape (batch, input_dim).
+        d: Dictionary matrix of shape (input_dim, n_atoms).
+        n_atoms: Number of dictionary atoms.
+        n_settle: Number of settling iterations.
+        infer_rate: Step size for sparse inference.
+        sparsity: Soft-threshold level.
+
+    Returns:
+        Sparse codes z of shape (batch, n_atoms), non-negative,
+        clipped at ``_Z_CLIP``.
+    """
+    z = np.zeros((x.shape[0], n_atoms))
+    for _ in range(n_settle):
+        residual = x - z @ d.T
+        z = z + infer_rate * (residual @ d)
+        z = np.maximum(0.0, z - sparsity * infer_rate)
+        np.minimum(z, _Z_CLIP, out=z)
+    return z
+
 
 class ProductOfExperts:
-    """Factored dictionary: D = rule_codebook x position_codebook.
+    """Factored dictionary: D = rule_codebook + position_codebook.
 
     Why? Standard dictionaries allocate atoms to cover the joint
-    (rule, position) space. Gravity has many positions → many atoms.
-    By factoring into rule codes (3-5 dims) and position codes (3-5 dims),
-    each rule gets a compact representation regardless of positional
-    diversity. Composition = combining rule codes from different rules.
+    (rule, position) space. Gravity has many positions -> many atoms.
+    By factoring into rule codes (``n_rule_atoms`` dims) and position
+    codes (``n_pos_atoms`` dims), each rule gets a compact representation
+    regardless of positional diversity. Composition = combining rule codes
+    from different rules.
 
     Architecture:
-        x → [rule_code, pos_code] via two parallel ISTA settlers
+        x -> [rule_code, pos_code] via two parallel ISTA settlers
         reconstruction = rule_decoder(rule_code) + pos_decoder(pos_code)
 
     The rule codes are what we evaluate for compositionality.
+
+    Args:
+        n_rule_atoms: Number of atoms in the rule codebook.
+        n_pos_atoms: Number of atoms in the position codebook.
+        sparsity: Sparsity penalty coefficient.
+        infer_rate: Step size for ISTA inference.
+        learn_rate: Step size for Hebbian dictionary updates.
+        n_settle: Number of ISTA settling iterations.
+        seed: Random seed for reproducibility.
     """
 
     def __init__(
         self,
-        n_atoms: int = 8,
         n_rule_atoms: int = 4,
         n_pos_atoms: int = 4,
         sparsity: float = 0.02,
@@ -68,9 +111,17 @@ class ProductOfExperts:
         epochs: int = 80,
         batch_size: int = 64,
     ) -> list[dict[str, float | int]]:
-        """Train both codebooks jointly."""
+        """Train both codebooks jointly on unlabelled data.
+
+        Args:
+            data: Training data of shape (N, input_dim).
+            epochs: Number of training epochs.
+            batch_size: Mini-batch size.
+
+        Returns:
+            List of dicts with keys ``"epoch"`` and ``"loss"`` per epoch.
+        """
         n, d = data.shape
-        # Initialize both dictionaries
         self._D_rule = self._rng.standard_normal((d, self.n_rule_atoms))
         self._D_rule /= np.linalg.norm(self._D_rule, axis=0, keepdims=True) + 1e-8
         self._D_pos = self._rng.standard_normal((d, self.n_pos_atoms))
@@ -85,19 +136,20 @@ class ProductOfExperts:
                 x = data[idx[start : start + batch_size]]
                 b = x.shape[0]
 
-                # Parallel ISTA settle for both codebooks
-                z_rule = self._ista(x, self._D_rule, self.n_rule_atoms)
-                z_pos = self._ista(x, self._D_pos, self.n_pos_atoms)
+                z_rule = _run_ista(
+                    x, self._D_rule, self.n_rule_atoms,
+                    self.n_settle, self.infer_rate, self.sparsity,
+                )
+                z_pos = _run_ista(
+                    x, self._D_pos, self.n_pos_atoms,
+                    self.n_settle, self.infer_rate, self.sparsity,
+                )
 
-                # Combined reconstruction
                 recon = z_rule @ self._D_rule.T + z_pos @ self._D_pos.T
                 residual = x - recon
 
-                # Separate Hebbian updates
-                # Rule dictionary gets residual signal
                 self._D_rule += self.learn_rate * (residual.T @ z_rule) / b
                 self._D_rule /= np.linalg.norm(self._D_rule, axis=0, keepdims=True) + 1e-8
-                # Position dictionary gets residual signal
                 self._D_pos += self.learn_rate * (residual.T @ z_pos) / b
                 self._D_pos /= np.linalg.norm(self._D_pos, axis=0, keepdims=True) + 1e-8
 
@@ -106,37 +158,67 @@ class ProductOfExperts:
             history.append({"epoch": epoch, "loss": epoch_loss / max(nb, 1)})
         return history
 
-    def _ista(self, x: np.ndarray, d: np.ndarray, n_atoms: int) -> np.ndarray:
-        """ISTA settling for one codebook."""
-        n = x.shape[0]
-        z = np.zeros((n, n_atoms))
-        for _ in range(self.n_settle):
-            residual = x - z @ d.T
-            drive = residual @ d
-            z = z + self.infer_rate * drive
-            z = np.maximum(0.0, z - self.sparsity * self.infer_rate)
-            np.minimum(z, 5.0, out=z)
-        return z
-
     def encode(self, data: np.ndarray) -> np.ndarray:
-        """Return concatenated [rule_codes, pos_codes]."""
-        assert self._D_rule is not None and self._D_pos is not None  # noqa: S101
-        z_rule = self._ista(data, self._D_rule, self.n_rule_atoms)
-        z_pos = self._ista(data, self._D_pos, self.n_pos_atoms)
+        """Encode inputs as concatenated [rule_codes, pos_codes].
+
+        Args:
+            data: Input data of shape (N, input_dim).
+
+        Returns:
+            Concatenated codes of shape (N, n_rule_atoms + n_pos_atoms).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D_rule is None or self._D_pos is None:
+            msg = "Model not trained yet. Call train() first."
+            raise RuntimeError(msg)
+        z_rule = _run_ista(
+            data, self._D_rule, self.n_rule_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
+        z_pos = _run_ista(
+            data, self._D_pos, self.n_pos_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
         return np.hstack([z_rule, z_pos])
 
     def reconstruction_error(self, data: np.ndarray) -> np.ndarray:
-        """Per-sample MSE."""
-        assert self._D_rule is not None and self._D_pos is not None  # noqa: S101
-        z_rule = self._ista(data, self._D_rule, self.n_rule_atoms)
-        z_pos = self._ista(data, self._D_pos, self.n_pos_atoms)
+        """Compute per-sample mean squared reconstruction error.
+
+        Args:
+            data: Input data of shape (N, input_dim).
+
+        Returns:
+            Per-sample MSE of shape (N,).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D_rule is None or self._D_pos is None:
+            msg = "Model not trained yet. Call train() first."
+            raise RuntimeError(msg)
+        z_rule = _run_ista(
+            data, self._D_rule, self.n_rule_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
+        z_pos = _run_ista(
+            data, self._D_pos, self.n_pos_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
         recon = z_rule @ self._D_rule.T + z_pos @ self._D_pos.T
         return np.mean((data - recon) ** 2, axis=1)
 
     @property
     def dictionary(self) -> np.ndarray:
-        """Combined dictionary [D_rule | D_pos]."""
-        assert self._D_rule is not None and self._D_pos is not None  # noqa: S101
+        """Combined dictionary [D_rule | D_pos] of shape (input_dim, n_atoms).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D_rule is None or self._D_pos is None:
+            msg = "Model not trained yet. Call train() first."
+            raise RuntimeError(msg)
         return np.hstack([self._D_rule, self._D_pos])
 
 
@@ -154,6 +236,11 @@ class SlotDictionary:
     - Slots are updated via weighted mean of assigned inputs
 
     For composition evaluation, we check which slots activate (not atoms).
+
+    Args:
+        n_atoms: Number of slots.
+        n_settle: Number of slot-refinement iterations.
+        seed: Random seed for reproducibility.
     """
 
     def __init__(
@@ -175,7 +262,16 @@ class SlotDictionary:
         epochs: int = 80,
         batch_size: int = 64,
     ) -> list[dict[str, float | int]]:
-        """Train slot prototypes via iterative refinement."""
+        """Train slot prototypes via iterative refinement.
+
+        Args:
+            data: Training data of shape (N, input_dim).
+            epochs: Number of training epochs.
+            batch_size: Mini-batch size.
+
+        Returns:
+            List of dicts with keys ``"epoch"`` and ``"loss"`` per epoch.
+        """
         n, d = data.shape
         # Initialize slots from data (k-means++ style)
         self._slots = np.zeros((self.n_atoms, d))
@@ -204,21 +300,16 @@ class SlotDictionary:
                 # Iterative slot refinement
                 slots = self._slots.copy()
                 for _ in range(self.n_settle):
-                    # Attention: (batch, n_atoms)
                     attn_logits = x @ slots.T * self._scale
                     attn = _softmax(attn_logits, axis=-1)
-                    # Weighted update: each slot gets its weighted mean input
-                    for k in range(self.n_atoms):
-                        weights = attn[:, k]  # (batch,)
-                        w_sum = weights.sum() + 1e-8
-                        slots[k] = (weights[:, None] * x).sum(axis=0) / w_sum
+                    # Vectorized slot update: (n_atoms, d)
+                    w_norm = attn.sum(axis=0, keepdims=True) + 1e-8  # (1, n_atoms)
+                    slots = (attn.T @ x) / w_norm.T
 
-                # Reconstruction: each sample reconstructs from its slot mixture
                 recon = attn @ slots
                 residual = x - recon
                 batch_loss = float(np.mean(residual**2))
 
-                # Update slots with momentum
                 self._slots = 0.9 * self._slots + 0.1 * slots
                 epoch_loss += batch_loss
                 nb += 1
@@ -226,29 +317,57 @@ class SlotDictionary:
         return history
 
     def encode(self, data: np.ndarray) -> np.ndarray:
-        """Return slot attention weights as 'activation codes'."""
-        assert self._slots is not None  # noqa: S101
+        """Return slot attention weights as activation codes.
+
+        Args:
+            data: Input data of shape (N, input_dim).
+
+        Returns:
+            Attention weights of shape (N, n_atoms).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._slots is None:
+            msg = "Model not trained yet. Call train() first."
+            raise RuntimeError(msg)
         slots = self._slots.copy()
         for _ in range(self.n_settle):
             attn_logits = data @ slots.T * self._scale
             attn = _softmax(attn_logits, axis=-1)
-            for k in range(self.n_atoms):
-                weights = attn[:, k]
-                w_sum = weights.sum() + 1e-8
-                slots[k] = (weights[:, None] * data).sum(axis=0) / w_sum
+            w_norm = attn.sum(axis=0, keepdims=True) + 1e-8
+            slots = (attn.T @ data) / w_norm.T
         return _softmax(data @ slots.T * self._scale, axis=-1)
 
     def reconstruction_error(self, data: np.ndarray) -> np.ndarray:
-        """Per-sample reconstruction MSE."""
-        assert self._slots is not None  # noqa: S101
+        """Compute per-sample reconstruction MSE.
+
+        Args:
+            data: Input data of shape (N, input_dim).
+
+        Returns:
+            Per-sample MSE of shape (N,).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._slots is None:
+            msg = "Model not trained yet. Call train() first."
+            raise RuntimeError(msg)
         codes = self.encode(data)
         recon = codes @ self._slots
         return np.mean((data - recon) ** 2, axis=1)
 
     @property
     def dictionary(self) -> np.ndarray:
-        """Slot prototypes transposed to (input_dim, n_atoms)."""
-        assert self._slots is not None  # noqa: S101
+        """Slot prototypes transposed to (input_dim, n_atoms).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._slots is None:
+            msg = "Model not trained yet. Call train() first."
+            raise RuntimeError(msg)
         return self._slots.T
 
 
@@ -261,10 +380,19 @@ class ContrastiveDictionary:
     each event. We penalize atoms that fire on multiple rules.
 
     This requires rule labels during training (available since we generate
-    the data), but NOT during inference. The dictionary itself is rule-agnostic;
-    the contrastive loss just shapes it during learning.
+    the data), but NOT during inference. The dictionary itself is
+    rule-agnostic; the contrastive loss just shapes it during learning.
 
     Loss = reconstruction_error + lambda * cross_rule_activation_penalty
+
+    Args:
+        n_atoms: Number of dictionary atoms.
+        sparsity: Sparsity penalty coefficient.
+        contrastive_weight: Weight for the contrastive specialization loss.
+        infer_rate: Step size for ISTA inference.
+        learn_rate: Step size for Hebbian dictionary updates.
+        n_settle: Number of ISTA settling iterations.
+        seed: Random seed for reproducibility.
     """
 
     def __init__(
@@ -293,11 +421,20 @@ class ContrastiveDictionary:
         epochs: int = 80,
         batch_size: int = 64,
     ) -> list[dict[str, float | int]]:
-        """Train with rule labels for contrastive pressure."""
+        """Train with rule labels for contrastive specialization pressure.
+
+        Args:
+            rule_data: Mapping from rule name to encoded event arrays,
+                each of shape (N_rule, input_dim).
+            epochs: Number of training epochs.
+            batch_size: Mini-batch size.
+
+        Returns:
+            List of dicts with keys ``"epoch"`` and ``"loss"`` per epoch.
+        """
         rules = list(rule_data.keys())
         n_rules = len(rules)
 
-        # Build labeled dataset: (data, rule_index)
         all_x = []
         all_labels = []
         for ri, rule in enumerate(rules):
@@ -321,40 +458,35 @@ class ContrastiveDictionary:
                 y = labels[bi]
                 b = x.shape[0]
 
-                # ISTA settle
-                z = self._ista_settle(x)
+                z = _run_ista(
+                    x, self._D, self.n_atoms,
+                    self.n_settle, self.infer_rate, self.sparsity,
+                )
 
-                # Reconstruction update
                 residual = x - z @ self._D.T
                 recon_grad = (residual.T @ z) / b
 
-                # Contrastive penalty: for each atom, compute mean activation
-                # per rule in this batch. Penalize if atom fires on >1 rule.
-                contrast_grad = np.zeros_like(self._D)
-                for j in range(self.n_atoms):
-                    rule_means = np.zeros(n_rules)
-                    for ri in range(n_rules):
-                        mask = y == ri
-                        if mask.any():
-                            rule_means[ri] = np.mean(np.abs(z[mask, j]))
-                    # Penalty: push toward max-only activation
-                    total = rule_means.sum() + 1e-12
-                    target = np.zeros(n_rules)
-                    target[np.argmax(rule_means)] = total
-                    penalty = rule_means - target  # negative for non-max rules
-                    # Translate to dictionary gradient: reduce dictionary column
-                    # alignment with non-specialized rules
-                    for ri in range(n_rules):
-                        if penalty[ri] > 0:
-                            mask = y == ri
-                            if mask.any():
-                                contrast_grad[:, j] -= (
-                                    penalty[ri]
-                                    * x[mask].mean(axis=0)
-                                    * 0.1
-                                )
+                # Vectorized contrastive gradient.
+                # rule_means_mat[ri, j] = mean |activation| of atom j on rule ri.
+                rule_means_mat = np.zeros((n_rules, self.n_atoms))
+                for ri in range(n_rules):
+                    mask = y == ri
+                    if mask.any():
+                        rule_means_mat[ri] = np.abs(z[mask]).mean(axis=0)
 
-                # Combined update
+                # penalty[ri, j] = rule_means_mat[ri, j] for non-max rules, 0 otherwise.
+                max_rule = np.argmax(rule_means_mat, axis=0)  # (n_atoms,)
+                penalty = rule_means_mat.copy()
+                penalty[max_rule, np.arange(self.n_atoms)] = 0.0
+
+                # Push atoms away from non-dominant rule data.
+                contrast_grad = np.zeros_like(self._D)
+                for ri in range(n_rules):
+                    mask = y == ri
+                    if mask.any() and penalty[ri].max() > 1e-12:
+                        x_mean = x[mask].mean(axis=0)   # (input_dim,)
+                        contrast_grad -= (x_mean[:, None] * penalty[ri][None, :]) * 0.1
+
                 self._D += self.learn_rate * (
                     recon_grad + self.contrastive_weight * contrast_grad
                 )
@@ -371,7 +503,16 @@ class ContrastiveDictionary:
         epochs: int = 80,
         batch_size: int = 64,
     ) -> list[dict[str, float | int]]:
-        """Standard train (no labels) — falls back to regular ISTA."""
+        """Train without labels — falls back to standard ISTA (no contrastive loss).
+
+        Args:
+            data: Training data of shape (N, input_dim).
+            epochs: Number of training epochs.
+            batch_size: Mini-batch size.
+
+        Returns:
+            List of dicts with keys ``"epoch"`` and ``"loss"`` per epoch.
+        """
         n, d = data.shape
         self._D = self._rng.standard_normal((d, self.n_atoms))
         self._D /= np.linalg.norm(self._D, axis=0, keepdims=True) + 1e-8
@@ -383,7 +524,10 @@ class ContrastiveDictionary:
             for start in range(0, n, batch_size):
                 x = data[idx[start : start + batch_size]]
                 b = x.shape[0]
-                z = self._ista_settle(x)
+                z = _run_ista(
+                    x, self._D, self.n_atoms,
+                    self.n_settle, self.infer_rate, self.sparsity,
+                )
                 residual = x - z @ self._D.T
                 self._D += self.learn_rate * (residual.T @ z) / b
                 self._D /= np.linalg.norm(self._D, axis=0, keepdims=True) + 1e-8
@@ -392,32 +536,54 @@ class ContrastiveDictionary:
             history.append({"epoch": epoch, "loss": epoch_loss / max(nb, 1)})
         return history
 
-    def _ista_settle(self, x: np.ndarray) -> np.ndarray:
-        """ISTA settling."""
-        assert self._D is not None  # noqa: S101
-        b = x.shape[0]
-        z = np.zeros((b, self.n_atoms))
-        for _ in range(self.n_settle):
-            residual = x - z @ self._D.T
-            drive = residual @ self._D
-            z = z + self.infer_rate * drive
-            z = np.maximum(0.0, z - self.sparsity * self.infer_rate)
-            np.minimum(z, 5.0, out=z)
-        return z
-
     def encode(self, data: np.ndarray) -> np.ndarray:
-        """Encode via ISTA."""
-        return self._ista_settle(data)
+        """Encode inputs via ISTA settling.
+
+        Args:
+            data: Input data of shape (N, input_dim).
+
+        Returns:
+            Sparse codes of shape (N, n_atoms).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D is None:
+            msg = "Model not trained yet. Call train() or train_with_labels() first."
+            raise RuntimeError(msg)
+        return _run_ista(
+            data, self._D, self.n_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
 
     def reconstruction_error(self, data: np.ndarray) -> np.ndarray:
-        """Per-sample MSE."""
+        """Compute per-sample mean squared reconstruction error.
+
+        Args:
+            data: Input data of shape (N, input_dim).
+
+        Returns:
+            Per-sample MSE of shape (N,).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D is None:
+            msg = "Model not trained yet. Call train() or train_with_labels() first."
+            raise RuntimeError(msg)
         z = self.encode(data)
-        assert self._D is not None  # noqa: S101
         return np.mean((data - z @ self._D.T) ** 2, axis=1)
 
     @property
     def dictionary(self) -> np.ndarray:
-        assert self._D is not None  # noqa: S101
+        """The dictionary matrix D of shape (input_dim, n_atoms).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D is None:
+            msg = "Model not trained yet. Call train() or train_with_labels() first."
+            raise RuntimeError(msg)
         return self._D
 
 
@@ -434,11 +600,20 @@ class ContrastiveProductOfExperts:
 
     Requires rule labels during training (available since we generate
     data), but NOT during inference.
+
+    Args:
+        n_rule_atoms: Number of atoms in the rule codebook.
+        n_pos_atoms: Number of atoms in the position codebook.
+        sparsity: Sparsity penalty coefficient.
+        contrastive_weight: Weight for the contrastive specialization loss.
+        infer_rate: Step size for ISTA inference.
+        learn_rate: Step size for Hebbian dictionary updates.
+        n_settle: Number of ISTA settling iterations.
+        seed: Random seed for reproducibility.
     """
 
     def __init__(
         self,
-        n_atoms: int = 10,
         n_rule_atoms: int = 5,
         n_pos_atoms: int = 5,
         sparsity: float = 0.02,
@@ -466,11 +641,20 @@ class ContrastiveProductOfExperts:
         epochs: int = 80,
         batch_size: int = 64,
     ) -> list[dict[str, float | int]]:
-        """Train with rule labels for contrastive pressure on rule codebook."""
+        """Train with rule labels for contrastive pressure on the rule codebook.
+
+        Args:
+            rule_data: Mapping from rule name to encoded event arrays,
+                each of shape (N_rule, input_dim).
+            epochs: Number of training epochs.
+            batch_size: Mini-batch size.
+
+        Returns:
+            List of dicts with keys ``"epoch"`` and ``"loss"`` per epoch.
+        """
         rules = list(rule_data.keys())
         n_rules = len(rules)
 
-        # Build labeled dataset
         all_x = []
         all_labels = []
         for ri, rule in enumerate(rules):
@@ -480,7 +664,6 @@ class ContrastiveProductOfExperts:
         labels = np.array(all_labels)
         n, d = data.shape
 
-        # Initialize both dictionaries
         self._D_rule = self._rng.standard_normal((d, self.n_rule_atoms))
         self._D_rule /= np.linalg.norm(self._D_rule, axis=0, keepdims=True) + 1e-8
         self._D_pos = self._rng.standard_normal((d, self.n_pos_atoms))
@@ -497,40 +680,41 @@ class ContrastiveProductOfExperts:
                 y = labels[bi]
                 b = x.shape[0]
 
-                # Parallel ISTA settle
-                z_rule = self._ista(x, self._D_rule, self.n_rule_atoms)
-                z_pos = self._ista(x, self._D_pos, self.n_pos_atoms)
+                z_rule = _run_ista(
+                    x, self._D_rule, self.n_rule_atoms,
+                    self.n_settle, self.infer_rate, self.sparsity,
+                )
+                z_pos = _run_ista(
+                    x, self._D_pos, self.n_pos_atoms,
+                    self.n_settle, self.infer_rate, self.sparsity,
+                )
 
-                # Combined reconstruction
                 recon = z_rule @ self._D_rule.T + z_pos @ self._D_pos.T
                 residual = x - recon
 
-                # Position codebook: pure reconstruction update
+                # Position codebook: pure reconstruction update.
                 self._D_pos += self.learn_rate * (residual.T @ z_pos) / b
                 self._D_pos /= np.linalg.norm(self._D_pos, axis=0, keepdims=True) + 1e-8
 
-                # Rule codebook: reconstruction + contrastive
+                # Rule codebook: reconstruction + vectorized contrastive gradient.
                 recon_grad = (residual.T @ z_rule) / b
 
-                # Contrastive penalty on rule atoms
+                rule_means_mat = np.zeros((n_rules, self.n_rule_atoms))
+                for ri in range(n_rules):
+                    mask = y == ri
+                    if mask.any():
+                        rule_means_mat[ri] = np.abs(z_rule[mask]).mean(axis=0)
+
+                max_rule = np.argmax(rule_means_mat, axis=0)
+                penalty = rule_means_mat.copy()
+                penalty[max_rule, np.arange(self.n_rule_atoms)] = 0.0
+
                 contrast_grad = np.zeros_like(self._D_rule)
-                for j in range(self.n_rule_atoms):
-                    rule_means = np.zeros(n_rules)
-                    for ri in range(n_rules):
-                        mask = y == ri
-                        if mask.any():
-                            rule_means[ri] = np.mean(np.abs(z_rule[mask, j]))
-                    total = rule_means.sum() + 1e-12
-                    target = np.zeros(n_rules)
-                    target[np.argmax(rule_means)] = total
-                    penalty = rule_means - target
-                    for ri in range(n_rules):
-                        if penalty[ri] > 0:
-                            mask = y == ri
-                            if mask.any():
-                                contrast_grad[:, j] -= (
-                                    penalty[ri] * x[mask].mean(axis=0) * 0.1
-                                )
+                for ri in range(n_rules):
+                    mask = y == ri
+                    if mask.any() and penalty[ri].max() > 1e-12:
+                        x_mean = x[mask].mean(axis=0)
+                        contrast_grad -= (x_mean[:, None] * penalty[ri][None, :]) * 0.1
 
                 self._D_rule += self.learn_rate * (
                     recon_grad + self.contrastive_weight * contrast_grad
@@ -548,7 +732,16 @@ class ContrastiveProductOfExperts:
         epochs: int = 80,
         batch_size: int = 64,
     ) -> list[dict[str, float | int]]:
-        """Standard train (no labels) — falls back to PoE without contrastive."""
+        """Train without labels — falls back to PoE without contrastive loss.
+
+        Args:
+            data: Training data of shape (N, input_dim).
+            epochs: Number of training epochs.
+            batch_size: Mini-batch size.
+
+        Returns:
+            List of dicts with keys ``"epoch"`` and ``"loss"`` per epoch.
+        """
         n, d = data.shape
         self._D_rule = self._rng.standard_normal((d, self.n_rule_atoms))
         self._D_rule /= np.linalg.norm(self._D_rule, axis=0, keepdims=True) + 1e-8
@@ -562,8 +755,14 @@ class ContrastiveProductOfExperts:
             for start in range(0, n, batch_size):
                 x = data[idx[start : start + batch_size]]
                 b = x.shape[0]
-                z_rule = self._ista(x, self._D_rule, self.n_rule_atoms)
-                z_pos = self._ista(x, self._D_pos, self.n_pos_atoms)
+                z_rule = _run_ista(
+                    x, self._D_rule, self.n_rule_atoms,
+                    self.n_settle, self.infer_rate, self.sparsity,
+                )
+                z_pos = _run_ista(
+                    x, self._D_pos, self.n_pos_atoms,
+                    self.n_settle, self.infer_rate, self.sparsity,
+                )
                 recon = z_rule @ self._D_rule.T + z_pos @ self._D_pos.T
                 residual = x - recon
                 self._D_rule += self.learn_rate * (residual.T @ z_rule) / b
@@ -575,41 +774,79 @@ class ContrastiveProductOfExperts:
             history.append({"epoch": epoch, "loss": epoch_loss / max(nb, 1)})
         return history
 
-    def _ista(self, x: np.ndarray, d: np.ndarray, n_atoms: int) -> np.ndarray:
-        """ISTA settling for one codebook."""
-        n = x.shape[0]
-        z = np.zeros((n, n_atoms))
-        for _ in range(self.n_settle):
-            residual = x - z @ d.T
-            drive = residual @ d
-            z = z + self.infer_rate * drive
-            z = np.maximum(0.0, z - self.sparsity * self.infer_rate)
-            np.minimum(z, 5.0, out=z)
-        return z
-
     def encode(self, data: np.ndarray) -> np.ndarray:
-        """Return concatenated [rule_codes, pos_codes]."""
-        assert self._D_rule is not None and self._D_pos is not None  # noqa: S101
-        z_rule = self._ista(data, self._D_rule, self.n_rule_atoms)
-        z_pos = self._ista(data, self._D_pos, self.n_pos_atoms)
+        """Encode inputs as concatenated [rule_codes, pos_codes].
+
+        Args:
+            data: Input data of shape (N, input_dim).
+
+        Returns:
+            Concatenated codes of shape (N, n_rule_atoms + n_pos_atoms).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D_rule is None or self._D_pos is None:
+            msg = "Model not trained yet. Call train() or train_with_labels() first."
+            raise RuntimeError(msg)
+        z_rule = _run_ista(
+            data, self._D_rule, self.n_rule_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
+        z_pos = _run_ista(
+            data, self._D_pos, self.n_pos_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
         return np.hstack([z_rule, z_pos])
 
     def reconstruction_error(self, data: np.ndarray) -> np.ndarray:
-        """Per-sample MSE."""
-        assert self._D_rule is not None and self._D_pos is not None  # noqa: S101
-        z_rule = self._ista(data, self._D_rule, self.n_rule_atoms)
-        z_pos = self._ista(data, self._D_pos, self.n_pos_atoms)
+        """Compute per-sample mean squared reconstruction error.
+
+        Args:
+            data: Input data of shape (N, input_dim).
+
+        Returns:
+            Per-sample MSE of shape (N,).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D_rule is None or self._D_pos is None:
+            msg = "Model not trained yet. Call train() or train_with_labels() first."
+            raise RuntimeError(msg)
+        z_rule = _run_ista(
+            data, self._D_rule, self.n_rule_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
+        z_pos = _run_ista(
+            data, self._D_pos, self.n_pos_atoms,
+            self.n_settle, self.infer_rate, self.sparsity,
+        )
         recon = z_rule @ self._D_rule.T + z_pos @ self._D_pos.T
         return np.mean((data - recon) ** 2, axis=1)
 
     @property
     def dictionary(self) -> np.ndarray:
-        """Combined dictionary [D_rule | D_pos]."""
-        assert self._D_rule is not None and self._D_pos is not None  # noqa: S101
+        """Combined dictionary [D_rule | D_pos] of shape (input_dim, n_atoms).
+
+        Raises:
+            RuntimeError: If the model has not been trained yet.
+        """
+        if self._D_rule is None or self._D_pos is None:
+            msg = "Model not trained yet. Call train() or train_with_labels() first."
+            raise RuntimeError(msg)
         return np.hstack([self._D_rule, self._D_pos])
 
 
 def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
-    """Numerically stable softmax."""
+    """Compute numerically stable softmax.
+
+    Args:
+        x: Input array.
+        axis: Axis along which to compute softmax.
+
+    Returns:
+        Softmax output with the same shape as ``x``.
+    """
     e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
     return e_x / (e_x.sum(axis=axis, keepdims=True) + 1e-12)

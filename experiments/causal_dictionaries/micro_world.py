@@ -371,7 +371,7 @@ def generate_rule_events(
 
     Args:
         rule: Which rule to generate events for
-            ("gravity", "containment", or "contact").
+            ("gravity", "containment", "contact", "bounce", or "breakage").
         n_events: Exact number of events to generate.
         seed: Random seed for reproducibility.
 
@@ -656,7 +656,8 @@ def _generate_contact_events(n_events: int, seed: int) -> list[Event]:
         obj_type = OBJECT_TYPES[scenario_idx % len(OBJECT_TYPES)]
         name = f"{obj_type}{scenario_idx}"
 
-        col = int(rng.integers(0, GRID_COLS))
+        # Use interior columns so a push in either direction always moves the object
+        col = int(rng.integers(1, GRID_COLS - 1))
         world.place(name, row=0, col=col)
 
         direction = "right" if rng.random() < 0.5 else "left"
@@ -675,17 +676,17 @@ def _generate_contact_events(n_events: int, seed: int) -> list[Event]:
 
 
 def _generate_bounce_events(n_events: int, seed: int) -> list[Event]:
-    """Generate bounce events from elastic objects falling.
+    """Generate bounce events from elastic objects falling, with negatives.
 
-    Creates ball objects at various heights and collects bounce events
-    (upward displacement after landing). Only balls are elastic.
+    Mixes positive examples (ball falls and bounces) with negative examples
+    (ball already on floor — no fall, no bounce). Only balls are elastic.
 
     Args:
         n_events: Number of events to generate.
         seed: Random seed.
 
     Returns:
-        List of bounce events.
+        List of bounce and gravity events (positive and negative examples).
     """
     rng = np.random.default_rng(seed)
     events: list[Event] = []
@@ -694,18 +695,27 @@ def _generate_bounce_events(n_events: int, seed: int) -> list[Event]:
     while len(events) < n_events:
         world = GridWorld(seed=int(rng.integers(0, 2**31)))
         name = f"ball{scenario_idx}"
-
-        # Place ball at random height with no support
-        row = int(rng.integers(1, GRID_ROWS))
         col = int(rng.integers(0, GRID_COLS))
-        world.place(name, row=row, col=col)
 
-        step_events = world.step()
-        for e in step_events:
-            if e.rule == "bounce":
-                events.append(e)
-                if len(events) >= n_events:
-                    break
+        if scenario_idx % 3 == 0:
+            # Negative: ball already on floor — no fall, no bounce
+            world.place(name, row=0, col=col)
+            step_events = world.step()
+            for e in step_events:
+                if e.obj_name == name:
+                    events.append(e)
+                    if len(events) >= n_events:
+                        break
+        else:
+            # Positive: ball at random height with no support — falls and bounces
+            row = int(rng.integers(1, GRID_ROWS))
+            world.place(name, row=row, col=col)
+            step_events = world.step()
+            for e in step_events:
+                if e.rule == "bounce":
+                    events.append(e)
+                    if len(events) >= n_events:
+                        break
 
         scenario_idx += 1
 
@@ -713,18 +723,17 @@ def _generate_bounce_events(n_events: int, seed: int) -> list[Event]:
 
 
 def _generate_breakage_events(n_events: int, seed: int) -> list[Event]:
-    """Generate breakage events from fragile objects falling hard.
+    """Generate breakage events from fragile objects falling hard, with negatives.
 
-    Creates cup objects at heights >= BREAKAGE_THRESHOLD and collects
-    breakage events (state_change="broken"). Also generates negative
-    examples (small falls that don't trigger breakage).
+    Mixes positive examples (cup falls >= BREAKAGE_THRESHOLD rows and breaks)
+    with negative examples (cup falls only 1 row — below the breakage threshold).
 
     Args:
         n_events: Number of events to generate.
         seed: Random seed.
 
     Returns:
-        List of breakage events.
+        List of breakage and gravity events (positive and negative examples).
     """
     rng = np.random.default_rng(seed)
     events: list[Event] = []
@@ -733,18 +742,27 @@ def _generate_breakage_events(n_events: int, seed: int) -> list[Event]:
     while len(events) < n_events:
         world = GridWorld(seed=int(rng.integers(0, 2**31)))
         name = f"cup{scenario_idx}"
-
-        # Place cup at height >= 2 to ensure breakage
-        row = int(rng.integers(BREAKAGE_THRESHOLD, GRID_ROWS))
         col = int(rng.integers(0, GRID_COLS))
-        world.place(name, row=row, col=col)
 
-        step_events = world.step()
-        for e in step_events:
-            if e.rule == "breakage":
-                events.append(e)
-                if len(events) >= n_events:
-                    break
+        if scenario_idx % 3 == 0:
+            # Negative: cup falls < BREAKAGE_THRESHOLD rows — no breakage
+            world.place(name, row=1, col=col)
+            step_events = world.step()
+            for e in step_events:
+                if e.obj_name == name:
+                    events.append(e)
+                    if len(events) >= n_events:
+                        break
+        else:
+            # Positive: cup at height >= BREAKAGE_THRESHOLD — breaks on impact
+            row = int(rng.integers(BREAKAGE_THRESHOLD, GRID_ROWS))
+            world.place(name, row=row, col=col)
+            step_events = world.step()
+            for e in step_events:
+                if e.rule == "breakage":
+                    events.append(e)
+                    if len(events) >= n_events:
+                        break
 
         scenario_idx += 1
 

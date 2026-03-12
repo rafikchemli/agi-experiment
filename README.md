@@ -4,8 +4,21 @@ We study whether sparse dictionary learning on raw physical events can discover 
 
 We construct a minimal physics simulator producing structured transition events under five rules (gravity, containment, contact, bounce, breakage). A dictionary trained exclusively on single-rule events is then evaluated on multi-rule compositions. The key finding: a **ContrastiveDictionary** architecture that adds explicit specialization pressure during training achieves **9/9 composition tests** using only raw event tuples — no hand-designed features, no multi-rule training examples.
 
+## Conclusion
+
+Composable causal primitives do emerge from unsupervised dictionary learning — but only when the right architectural pressure is applied. Standard ISTA sparse coding fails on 6 of 9 composition tests because sparsity alone is too weak a signal for rule specialization. The **ContrastiveDictionary** succeeds on all 9 by adding one targeted innovation: during training, each atom is penalized for activating on data from multiple rules, pushing atoms toward one-atom-per-rule specialization without changing the reconstruction architecture or inference procedure.
+
+The critical lesson from the architecture comparison is that **factoring hurts at scale**. ProductOfExperts and ContrastivePoE both fail at 5 rules because their separate position codebooks activate differently on composition vs. training data, causing systematic Jaccard failures. Contrastive's unfactored reconstruction avoids this — every atom learns both spatial and causal patterns, and the contrastive loss shapes which events each atom responds to, not which dimensions it covers.
+
+This result has broader implications for representation learning: if you want representations that compose, you need explicit pressure toward composability during training. Reconstruction loss alone is insufficient — the contrastive term is not a regularizer, it is the mechanism by which causal structure emerges.
+
+<p align="center">
+  <img src="experiments/causal_dictionaries/results/all_models_comparison.png" width="900" alt="All architectures compared across all 9 composition tests">
+</p>
+
 ## Table of Contents
 
+- [Conclusion](#conclusion)
 - [1. Problem Statement](#1-problem-statement)
 - [2. Environment: Micro-World Simulator](#2-environment-micro-world-simulator)
 - [3. Event Encoding](#3-event-encoding)
@@ -289,6 +302,9 @@ make experiment
 # Baseline comparison (ISTA vs Contrastive side-by-side)
 make experiment ARGS="--compare"
 
+# All architectures compared (produces all_models_comparison.png)
+make experiment ARGS="--all-models"
+
 # Try different architectures
 make experiment ARGS="--arch ista"
 make experiment ARGS="--arch product-of-experts --n-atoms 8"
@@ -304,6 +320,7 @@ Output includes:
 - All 9 composition tests with reconstruction ratios and Jaccard similarities
 - Training loss curve, heatmap, and test visualization saved to `experiments/causal_dictionaries/results/`
 - With `--compare`: side-by-side comparison chart saved as `results/comparison.png`
+- With `--all-models`: 3-panel comparison across all architectures saved as `results/all_models_comparison.png`
 
 ### Running Tests
 

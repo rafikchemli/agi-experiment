@@ -168,7 +168,9 @@ class SparseDictionary:
         Returns:
             Sparse codes z of shape (batch, n_atoms).
         """
-        assert self._D is not None  # noqa: S101
+        if self._D is None:
+            msg = "Dictionary not trained yet. Call train() first."
+            raise RuntimeError(msg)
         batch = x.shape[0]
         z = np.zeros((batch, self.n_atoms))
 
